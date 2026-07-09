@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__/
+*.pyc
+*.o
+*.egg-info/
+.venv/
+.mplconfig-test/
+bin/
+build/
+tests/out/

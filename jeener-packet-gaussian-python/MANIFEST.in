@@ -1,0 +1,7 @@
+include README.md
+include LICENSE
+include CITATION.cff
+include RELEASE_CHECKLIST.md
+recursive-include docs *.tex *.pdf *.md
+recursive-include examples *.sh *.md
+recursive-include tests *.py

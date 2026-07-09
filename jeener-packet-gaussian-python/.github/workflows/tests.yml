@@ -1,0 +1,44 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+      - name: Run unit tests
+        env:
+          MPLBACKEND: Agg
+        run: python -m unittest discover -s tests
+      - name: Check CLI help
+        env:
+          MPLBACKEND: Agg
+        run: python -m jeener_packet_gaussian --help
+      - name: Run invariant-branch execution test
+        env:
+          MPLBACKEND: Agg
+        run: |
+          python -m jeener_packet_gaussian \
+            --mode eigen \
+            --kmax 0.03 \
+            --loops 0 \
+            --Nvec 0 0 0 \
+            --ent 1 \
+            --ent-native-model frozen \
+            --ent-native-source full \
+            --ent-NK 2 \
+            --ent-NT 3 \
+            --T 1.0 \
+            --npts 101 \
+            --no-show 1 \
+            --outdir ci_test_outputs

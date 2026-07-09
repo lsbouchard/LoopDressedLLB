@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the associated PRA paper and this code release."
+title: "Jeener Packet Gaussian C: Native packet-Gaussian benchmark engine"
+version: "2026.7.9"
+date-released: "2026-07-09"
+authors:
+  - family-names: "Bouchard"
+    given-names: "Louis-S."
+  - family-names: "Wu"
+    given-names: "Arianna"
+license: "LicenseRef-NonCommercial"

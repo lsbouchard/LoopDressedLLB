@@ -1,0 +1,733 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,longtable,array}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  urlcolor=blue!50!black,
+  citecolor=blue!50!black
+}
+
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\lstdefinestyle{bashstyle}{
+  basicstyle=\ttfamily\footnotesize,
+  frame=single,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  upquote=true
+}
+
+\lstdefinestyle{smallbash}{
+  basicstyle=\ttfamily\scriptsize,
+  frame=single,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  upquote=true
+}
+
+\title{\texttt{jeener\_packet\_gaussian.py}: Complete User Manual}
+\author{Louis-S. Bouchard \and Arianna Wu}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\section{Purpose and Scope}
+\texttt{jeener\_packet\_gaussian.py} is an integrated mesoscopic spin-packet
+simulator for the eight-spin Jeener cube. It combines deterministic packet
+dynamics, optional loop-dressed corrections, stochastic torque, short-memory
+damping, certified native packet-mode Gaussian diagnostics, and an optional
+engineered quadratic-Gaussian benchmark layer.
+
+This manual is a standalone reference for the code. It documents the
+current executable name, the current command-line interface, the physical
+meaning of the main options, the batch commands used for the PRA benchmark
+calculations, the expected outputs, and representative regression values.
+
+\section{Runtime Requirements}
+The code is a single Python program. It requires a standard scientific Python
+environment with:
+\begin{itemize}
+\item Python 3;
+\item NumPy;
+\item SciPy;
+\item Matplotlib.
+\end{itemize}
+For noninteractive batch runs, use \texttt{--no-show 1}. If running on a headless
+machine, set Matplotlib to an offscreen backend in the shell environment or use a
+Python environment already configured for batch plotting.
+
+\section{Program Overview}
+\subsection{Physical degrees of freedom}
+The native model evolves eight packet variables on the Jeener cube. Each packet
+\(j\) has a magnetization-like vector \(\mathbf M_j\) and a response/coherence
+vector \(\mathbf N_j\). The initialized packet state is placed on the rotated
+coherent-state constraint surface
+\begin{equation}
+|\mathbf M_j|^2 + |\mathbf N_j|^2 = R^2,
+\qquad
+\mathbf M_j \cdot \mathbf N_j = 0,
+\end{equation}
+with \(R=1\) in the default code configuration.
+
+\subsection{Initial-state preparation}
+Use \texttt{--Nvec Nx Ny Nz} to specify the response vector. The code projects the
+requested response vector into the tangent plane of each packet magnetization
+direction and preserves the requested tangent amplitude. The packet
+magnetization magnitude is then chosen as
+\begin{equation}
+|\mathbf M_j| = \sqrt{R^2 - |\mathbf N_j|^2}.
+\end{equation}
+For the benchmark preparation
+\[
+\texttt{--Nvec 0.30 0 0},
+\]
+the initialized packet state has
+\[
+|\mathbf N_j| = 0.30,
+\qquad
+|\mathbf M_j| \simeq 0.953939,
+\qquad
+\mathbf M_j \cdot \mathbf N_j = 0.
+\]
+
+\subsection{Main analysis layers}
+The program has four main layers:
+\begin{enumerate}[label=\arabic*.]
+\item spectral and time-domain diagnostics for the deterministic packet model;
+\item loop-dressed packet dynamics through \(\alpha\), \(\beta\), \(\sigma\), and
+\(\kappa\) coefficients;
+\item certified native packet-mode Gaussian entanglement diagnostics;
+\item optional engineered quadratic-Gaussian Hamiltonian benchmarks.
+\end{enumerate}
+
+\section{Basic Invocation}
+\subsection{General pattern}
+The usual batch invocation is:
+\begin{lstlisting}[style=bashstyle]
+python3 -u ./jeener_packet_gaussian.py [options...]
+\end{lstlisting}
+
+For PRA-style native Gaussian heatmaps, the core pattern is:
+\begin{lstlisting}[style=bashstyle]
+python3 -u ./jeener_packet_gaussian.py \
+  --mode eigen \
+  --kmax 0.03 \
+  --loops 0 \
+  --Nvec 0.30 0 0 \
+  --tip 0.05 \
+  --pattern staggered \
+  --ent 1 \
+  --ent-save 1 \
+  --ent-native-model frozen \
+  --ent-native-source full \
+  --ent-window 0.0:1.0 \
+  --ent-NK 13 \
+  --ent-NT 17 \
+  --T 8.0 \
+  --npts 2401 \
+  --fig-dpi 800 \
+  --fig-fontsize 12 \
+  --fig-cmap magma \
+  --fig-transparent 0 \
+  --no-show 1
+\end{lstlisting}
+
+\subsection{Mode selection}
+\begin{longtable}{L{0.22\textwidth}L{0.70\textwidth}}
+\toprule
+\textbf{Mode} & \textbf{Meaning} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Mode} & \textbf{Meaning} \\
+\midrule
+\endhead
+\texttt{all} & Runs eigenvalue maps, eigenvalue scatter/stick plots, and one FFT map. This is the default. \\
+\texttt{eigen} & Runs eigenvalue color maps, scatter plots, and stick spectra. This is the standard mode for the PRA entanglement command suite. \\
+\texttt{map} & Runs FFT color maps over a \(k\)-sweep. \\
+\texttt{fft} & Runs a per-spin FFT at \(k=0\). \\
+\texttt{growth} & Runs the maximum real eigenvalue growth diagnostic versus \(k\). \\
+\bottomrule
+\end{longtable}
+
+\section{Native Packet-Gaussian Entanglement}
+\subsection{Certified native models}
+The native entanglement analysis is enabled with \texttt{--ent 1}. The key switch
+is \texttt{--ent-native-model}:
+\begin{longtable}{L{0.24\textwidth}L{0.68\textwidth}}
+\toprule
+\textbf{Model} & \textbf{Meaning} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Model} & \textbf{Meaning} \\
+\midrule
+\endhead
+\texttt{frozen} & Uses the initial projected native packet generator. This is the benchmark model used for the PRA reproduction commands in this manual. \\
+\texttt{linearized} & Propagates the native Gaussian covariance with a time-dependent tangent-map model obtained by finite-differencing the nonlinear one-step map around the deterministic background trajectory. This is slower and useful for validation. \\
+\texttt{none} & Keeps certified native output at the separable baseline away from the exact invariant branch. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Invariant branch}
+When \(\mathbf N(0)=0\), the implemented native branch preserves
+\(\mathbf N(t)=0\). The certified native output is then forced to the separable
+baseline. This gives a useful classical control run:
+\begin{lstlisting}[style=bashstyle]
+python3 -u ./jeener_packet_gaussian.py \
+  --mode eigen --kmax 0.03 --loops 0 --Nvec 0 0 0 \
+  --ent 1 --ent-native-model frozen --ent-native-source full \
+  --ent-NK 4 --ent-NT 9 --T 8.0 --npts 801 --no-show 1
+\end{lstlisting}
+
+\subsection{Pairwise and multipartite outputs}
+The native Gaussian analysis can compute pairwise metrics, multipartite
+bipartition metrics, or both. The standard PRA commands use
+\texttt{--ent-layer both}, which is the default. Pair selection is controlled by
+\texttt{--ent-pairs}; multipartite subset selection is controlled by
+\texttt{--ent-multi-size}, \texttt{--ent-multi-subsets}, and
+\texttt{--ent-multi-partitions}.
+
+\section{Loop-Dressed Physics Controls}
+The loop order is selected with \texttt{--loops}. The allowed range is 0 through
+4. Nonzero loop order only changes the calculation when one or more loop
+coefficient lists are supplied.
+
+\begin{longtable}{L{0.20\textwidth}L{0.72\textwidth}}
+\toprule
+\textbf{Coefficient} & \textbf{Role} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Coefficient} & \textbf{Role} \\
+\midrule
+\endhead
+\texttt{--alpha} & Local coherent frequency-shift coefficients. These retune local packet precession and do not by themselves provide the dominant nonlocal entangling enhancement in the benchmark scans. \\
+\texttt{--beta} & Dissipative damping coefficients. These are typically suppressive for Gaussian entanglement diagnostics. \\
+\texttt{--sigma} & Coherent renormalization of the nonlocal dipolar \(M\)-\(M\) kernel. This is the main coherent enhancement channel in the benchmark hierarchy. \\
+\texttt{--kappa} & Coherent back-action renormalization. This can contribute with \(\sigma\), but is weaker by itself in the benchmark scans. \\
+\bottomrule
+\end{longtable}
+
+\section{Output Files}
+\subsection{Figure and data routing}
+By default, figures and exported \texttt{.npz} sidecar files are written to the
+current working directory. Use \texttt{--outdir <directory>} to route outputs to a
+dedicated folder. Use \texttt{--export-data 1} to export data sidecars when the
+code has a data payload available for the plot.
+
+\subsection{Standard native entanglement heatmaps}
+With \texttt{--ent-save 1}, the native Gaussian analysis writes:
+\begin{lstlisting}[style=smallbash]
+ent_pairwise_gaussian_logneg_heatmap.png
+ent_pairwise_gaussian_nupt_heatmap.png
+ent_pairwise_gaussian_duan_heatmap.png
+ent_multipartite_lnmin_heatmap.png
+ent_multipartite_full_insep_heatmap.png
+\end{lstlisting}
+For large command suites, append run-specific suffixes using a shell helper such
+as the \texttt{tag\_ent} function in Section~\ref{sec:pra-suite}.
+
+\subsection{Spectral and FFT outputs}
+The spectral and FFT layers save filenames containing the \(N\)-vector tag,
+\(k_{\max}\), and loop order. Typical outputs include:
+\begin{lstlisting}[style=smallbash]
+eigen_map_Nvec_<tag>_kmax_<value>_loops_<order>.png
+eigen_scatter_Nvec_<tag>_kmax_<value>_loops_<order>.png
+eigen_sticks_k_<value>_Nvec_<tag>_loops_<order>.png
+fft_map_Nvec_<tag>_kmax_<value>_loops_<order>_<kind>.png
+\end{lstlisting}
+
+\section{Command-Line Option Reference}
+\subsection{Execution, time, and spectral controls}
+\begin{longtable}{L{0.28\textwidth}L{0.64\textwidth}}
+\toprule
+\textbf{Option} & \textbf{Use} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Option} & \textbf{Use} \\
+\midrule
+\endhead
+\texttt{--mode \{all,eigen,map,fft,growth\}} & Selects the diagnostic layer to run. Default: \texttt{all}. \\
+\texttt{--k} & Representative \(k\) value for the eigen stick spectrum. Defaults to \(0.8 k_{\max}\). \\
+\texttt{--kmax} & Maximum \(k\) used for swept plots. Default in noninteractive mode: \texttt{0.1}. \\
+\texttt{--NK} & Number of \(k\) samples for FFT maps; also used as a convenient override in some swept diagnostics. \\
+\texttt{--T} & Time-domain duration. Default: \texttt{200.0}. \\
+\texttt{--npts} & Number of time samples. Default: \texttt{8001}. \\
+\texttt{--tip} & Initial packet magnetization tip angle in radians. Default: \texttt{0.05}. \\
+\texttt{--grange} & Optional symmetric vertical limit for the growth plot. \\
+\texttt{--show-growth} & When \texttt{--mode all}, also generate the growth curve if set to 1. \\
+\texttt{--fft-norm} & Normalize each \(k\)-row in FFT maps. Default: \texttt{1}. \\
+\texttt{--frange} & Frequency half-window for FFT and spectral plots. Default: \texttt{0.25}. \\
+\texttt{--plotsigma} & Gaussian smear width for FFT maps. Default: \texttt{0.0015}. \\
+\texttt{--NFFT} & FFT zero-padding length. Default: \texttt{131072}. \\
+\texttt{--interactive} & If set to 1, prompts for omitted parameters in a terminal. Default: \texttt{0}. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Initial state controls}
+\begin{longtable}{L{0.28\textwidth}L{0.64\textwidth}}
+\toprule
+\textbf{Option} & \textbf{Use} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Option} & \textbf{Use} \\
+\midrule
+\endhead
+\texttt{--Nvec Nx Ny [Nz]} & Preferred interface for the base response vector. If \(N_z\) is omitted it is taken as 0. \\
+\texttt{--N0} & Compatibility interface for setting response magnitude. Prefer \texttt{--Nvec}. \\
+\texttt{--n\_hat} & Direction used with \texttt{--N0}. \\
+\texttt{--pattern \{staggered,uniform,noisy\}} & Distribution pattern for the base response over the cube. The PRA benchmarks use \texttt{staggered}. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Loop and nonlinear controls}
+\begin{longtable}{L{0.28\textwidth}L{0.64\textwidth}}
+\toprule
+\textbf{Option} & \textbf{Use} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Option} & \textbf{Use} \\
+\midrule
+\endhead
+\texttt{--loops} & Loop correction order, clamped to 0 through 4. Default in noninteractive mode: \texttt{0}. \\
+\texttt{--alpha} & \(\delta\omega/k\) coefficient list \(\alpha_1,\ldots,\alpha_4\). \\
+\texttt{--beta} & \(\lambda_\perp/k\) coefficient list \(\beta_1,\ldots,\beta_4\). \\
+\texttt{--sigma} & Coherent dipolar-kernel coefficient list \(\sigma_1,\ldots,\sigma_4\). \\
+\texttt{--kappa} & Coherent back-action coefficient list \(\kappa_2,\ldots,\kappa_4\). \\
+\texttt{--alpha-k2} & Extra local-shift scaling by \(1+a_{k2}k^2\). Default: \texttt{0.0}. \\
+\texttt{--beta-k2} & Extra damping scaling by \(1+b_{k2}k^2\). Default: \texttt{0.0}. \\
+\texttt{--beta-anis} & Damping anisotropy, with \(\lambda_x=\lambda(1+\mathrm{ba})\) and \(\lambda_y=\lambda(1-\mathrm{ba})\). Default: \texttt{0.0}. \\
+\texttt{--dynamic-mix} & Use \(k|\mathbf N_a(t)|\) in the \(N\)-mixing field when 1; use \(k|\mathbf N_0|\) when 0. Default: \texttt{1}. \\
+\texttt{--cubic-eta} & Explicit \(|N|^2 dN\) inertial correction. Default: \texttt{0.0}. \\
+\texttt{--prefer-cubic} & If 1, use explicit cubic correction and bypass the multiplicative vertex term. Default: \texttt{0}. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Noise, memory, and metrics}
+\begin{longtable}{L{0.28\textwidth}L{0.64\textwidth}}
+\toprule
+\textbf{Option} & \textbf{Use} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Option} & \textbf{Use} \\
+\midrule
+\endhead
+\texttt{--noise} & Enable stochastic torque. Default in noninteractive mode: \texttt{0}. \\
+\texttt{--sde-scheme \{ito,strat\}} & Selects Ito/Euler-Maruyama or Stratonovich/Heun integration. Default: \texttt{ito}. \\
+\texttt{--noise-scale} & FDT-like scale \(D_\perp=\mathrm{noise\_scale}\lambda_\perp\). Default: \texttt{0.0}. \\
+\texttt{--noise-target \{M,MN\}} & Apply stochastic torque to \(M\) only or to both \(M\) and \(N\). Default: \texttt{M}. \\
+\texttt{--nreal} & Number of stochastic realizations for FFT averaging. Default: \texttt{1}. \\
+\texttt{--seed} & Random-number seed. Default: \texttt{12345}. \\
+\texttt{--mem} & Enable short-memory damping through a Prony expansion. Default in noninteractive mode: \texttt{0}. \\
+\texttt{--mem-target \{M,MN\}} & Apply memory to \(M\) only or to both \(M\) and \(N\). Default: \texttt{M}. \\
+\texttt{--mem-L} & Number of memory exponentials. Default: \texttt{0}. \\
+\texttt{--mem-tau}, \texttt{--mem-a} & Time constants and amplitudes for the Prony memory kernel. \\
+\texttt{--mem-tangent} & Apply memory only to transverse components when 1. Default: \texttt{1}. \\
+\texttt{--metrics} & Print deterministic summary metrics after figure generation. Default: \texttt{0}. \\
+\texttt{--metrics-k} & Fraction of \(k_{\max}\) used for the metrics run. Default: \texttt{0.8}. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Native Gaussian entanglement options}
+\begin{longtable}{L{0.31\textwidth}L{0.61\textwidth}}
+\toprule
+\textbf{Option} & \textbf{Use} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Option} & \textbf{Use} \\
+\midrule
+\endhead
+\texttt{--ent} & Enable entanglement analysis. Default: \texttt{0}. \\
+\texttt{--ent-layer \{pair,multi,both,gaussian\}} & Select pairwise, multipartite, both, or the pairwise Gaussian alias. Default: \texttt{both}. \\
+\texttt{--ent-pairs \{nn,all,custom\}} & Pair set for pairwise Gaussian metrics. Default: \texttt{nn}. \\
+\texttt{--ent-custom-pairs} & Custom pair list such as \texttt{0-1,2-5}. Used with \texttt{--ent-pairs custom}. \\
+\texttt{--ent-window} & Time-window fraction \(t_0:t_1\) sampled for heatmaps. Default: \texttt{0.8:1.0}. \\
+\texttt{--ent-S} & Effective packet spin length used for Holstein-Primakoff normalization. Default: \texttt{100.0}. \\
+\texttt{--ent-aggregate \{max,mean\}} & Aggregate selected pairs/subsets by best case or mean. Default: \texttt{max}. \\
+\texttt{--ent-NK} & Number of \(k\) samples for entanglement heatmaps. Defaults to \texttt{--NK} or 31. \\
+\texttt{--ent-NT} & Number of time bins inside the chosen window. Default: \texttt{41}. \\
+\texttt{--ent-save} & Save entanglement heatmap figures. Default: \texttt{1}. \\
+\texttt{--ent-cv-rot} & If positive, optimize the pairwise Duan witness over a local phase-rotation grid. Default: \texttt{0}. \\
+\texttt{--ent-phys-regularize} & Add the smallest isotropic noise needed to make sampled covariances quantum-physical before evaluating Gaussian entanglement. Default: \texttt{1}. \\
+\texttt{--ent-multi-size} & Subset size for multipartite analysis when no custom subsets are supplied. Default: \texttt{3}. \\
+\texttt{--ent-multi-subsets} & Custom multipartite subsets separated by semicolons, e.g. \texttt{0-1-2;0-1-4-5}. \\
+\texttt{--ent-multi-partitions \{1vr,all\}} & Test one-vs-rest or all unique bipartitions inside each selected subset. Default: \texttt{all}. \\
+\texttt{--ent-native-tol} & Tolerance for detecting the exact native invariant branch \(N(t)=0\). Default: \texttt{1e-15}. \\
+\texttt{--ent-native-model \{linearized,frozen,none\}} & Select the certified native model. Default: \texttt{linearized}. PRA benchmark commands in this manual use \texttt{frozen}. \\
+\texttt{--ent-native-source \{full,diag,cross,mm-only\}} & Diagnostic block-selection switch. In the canonical packet-mode model, the physical full tangent map is used. Default: \texttt{full}. \\
+\texttt{--ent-native-nth} & Initial thermal occupancy per native Gaussian mode. Default: \texttt{0.0}. \\
+\texttt{--ent-native-nbath} & Bath thermal occupancy for explicit native local damping terms. Default: \texttt{0.0}. \\
+\texttt{--ent-native-reg-warn} & Warning threshold for non-negligible native covariance repair. Default: \texttt{1e-6}. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Plotting and export options}
+\begin{longtable}{L{0.28\textwidth}L{0.64\textwidth}}
+\toprule
+\textbf{Option} & \textbf{Use} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Option} & \textbf{Use} \\
+\midrule
+\endhead
+\texttt{--fig-dpi} & DPI for saved figures. Default: \texttt{300}. \\
+\texttt{--fig-cmap} & Default heatmap colormap. Default: \texttt{magma}. \\
+\texttt{--fig-fontsize} & Base Matplotlib font size. Default: \texttt{11.0}. \\
+\texttt{--fig-transparent} & Save transparent figure backgrounds when 1. Default: \texttt{0}. \\
+\texttt{--no-show} & Suppress interactive \texttt{plt.show()} calls. Use \texttt{1} for batch runs. \\
+\texttt{--outdir} & Optional output directory for figures and exported data. \\
+\texttt{--export-data} & Export \texttt{.npz} sidecar data when available. Default: \texttt{1}. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Engineered Gaussian Hamiltonian options}
+\begin{longtable}{L{0.31\textwidth}L{0.61\textwidth}}
+\toprule
+\textbf{Option} & \textbf{Use} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Option} & \textbf{Use} \\
+\midrule
+\endhead
+\texttt{--eng} & Enable engineered Gaussian Hamiltonian analysis. Default: \texttt{0}. \\
+\texttt{--eng-preset} & Convenience preset: \texttt{none}, \texttt{cube-tms}, \texttt{cube-cluster}, \texttt{graph-cz}, \texttt{tact}, \texttt{tact-uniform}, \texttt{tact-checker}, \texttt{oatq}, \texttt{oatp}, or \texttt{hybrid}. \\
+\texttt{--eng-graph} & Graph for engineered edge terms: \texttt{cube-nn}, \texttt{cube}, \texttt{line}, \texttt{ring}, \texttt{star}, \texttt{complete}, \texttt{custom}, or \texttt{none}. \\
+\texttt{--eng-edges} & Custom weighted edge list such as \texttt{0-1:1,1-2:0.5}. \\
+\texttt{--eng-graph-weight} & Overall graph-edge scale. Default: \texttt{1.0}. \\
+\texttt{--eng-bs} & Beam-splitter edge coefficient. Default: \texttt{0.0}. \\
+\texttt{--eng-tms} & Two-mode-squeezing edge coefficient. Default: \texttt{0.0}. \\
+\texttt{--eng-cz} & Controlled-\(Z\)/\(Q_iQ_j\) graph interaction coefficient. Default: \texttt{0.0}. \\
+\texttt{--eng-sms} & Local single-mode squeezing coefficient. Default: \texttt{0.0}. \\
+\texttt{--eng-tact} & Collective TACT-like squeezing coefficient. Default: \texttt{0.0}. \\
+\texttt{--eng-oatq}, \texttt{--eng-oatp} & Collective OAT-like \(Q_u^2\) or \(P_u^2\) coefficients. Defaults: \texttt{0.0}. \\
+\texttt{--eng-omega} & Local harmonic rotation frequency. Default: \texttt{0.0}. \\
+\texttt{--eng-mode} & Collective supermode for engineered OAT/TACT terms. Choices include \texttt{uniform}, \texttt{bright}, \texttt{checker}, \texttt{staggered}, axis/layer modes, and \texttt{custom}. \\
+\texttt{--eng-mode-custom} & Eight custom weights for \texttt{--eng-mode custom}. \\
+\texttt{--eng-init} & Initial engineered Gaussian state: \texttt{coherent}, \texttt{vacuum}, \texttt{thermal}, \texttt{p-sq}, or \texttt{q-sq}. \\
+\texttt{--eng-r} & Single-mode squeezing parameter for \texttt{p-sq} or \texttt{q-sq}. Default: \texttt{0.0}. \\
+\texttt{--eng-nth-init} & Initial thermal occupancy for \texttt{--eng-init thermal}. Default: \texttt{0.0}. \\
+\texttt{--eng-gamma}, \texttt{--eng-nbath} & Uniform linear damping rate and bath occupancy. Defaults: \texttt{0.0}. \\
+\texttt{--eng-profile} & Interaction envelope: \texttt{constant}, \texttt{ramp}, \texttt{pulse}, \texttt{ramphold}, \texttt{rampholdquench}, \texttt{sin2}, or \texttt{echo}. \\
+\texttt{--eng-ramp-frac}, \texttt{--eng-hold-frac} & Ramp and hold fractions for ramp-hold profiles. Defaults: \texttt{0.2}, \texttt{0.8}. \\
+\texttt{--eng-pulse-on}, \texttt{--eng-pulse-off} & Pulse turn-on and turn-off fractions. Defaults: \texttt{0.0}, \texttt{1.0}. \\
+\texttt{--eng-echo-frac} & Echo sign-flip fraction. Default: \texttt{0.5}. \\
+\texttt{--eng-T}, \texttt{--eng-npts} & Engineered evolution time and time samples. Defaults: \texttt{40.0}, \texttt{801}. \\
+\texttt{--eng-window} & Time-window fraction for engineered metric heatmaps. Default: \texttt{0.0:1.0}. \\
+\texttt{--eng-gmax}, \texttt{--eng-NG}, \texttt{--eng-NT} & Engineered interaction sweep maximum, number of interaction samples, and number of time bins. Defaults: \texttt{1.0}, \texttt{21}, \texttt{41}. \\
+\texttt{--eng-full} & Compute full eight-mode bipartition metrics. Default: \texttt{1}. \\
+\texttt{--eng-save} & Save engineered-analysis figures. Default: \texttt{1}. \\
+\texttt{--eng-reg-warn} & Warning threshold for engineered covariance regularization. Default: \texttt{1e-6}. \\
+\bottomrule
+\end{longtable}
+
+\section{PRA Benchmark Command Suite}
+\label{sec:pra-suite}
+The commands below reproduce the standard native packet-Gaussian benchmark
+suite using the packaged executable.
+
+\subsection{Batch helper}
+\begin{lstlisting}[style=bashstyle]
+tag_ent () {
+  s="$1"
+  mv -f ent_pairwise_gaussian_logneg_heatmap.png  "ent_pairwise_gaussian_logneg_heatmap_${s}.png"
+  mv -f ent_pairwise_gaussian_nupt_heatmap.png    "ent_pairwise_gaussian_nupt_heatmap_${s}.png"
+  mv -f ent_pairwise_gaussian_duan_heatmap.png    "ent_pairwise_gaussian_duan_heatmap_${s}.png"
+  mv -f ent_multipartite_lnmin_heatmap.png        "ent_multipartite_lnmin_heatmap_${s}.png"
+  mv -f ent_multipartite_full_insep_heatmap.png   "ent_multipartite_full_insep_heatmap_${s}.png"
+}
+
+CODE=./jeener_packet_gaussian.py
+\end{lstlisting}
+
+\subsection{Classical invariant-manifold control}
+\begin{lstlisting}[style=bashstyle]
+python3 -u "$CODE" \
+  --mode eigen \
+  --kmax 0.03 \
+  --loops 0 \
+  --Nvec 0 0 0 \
+  --ent 1 \
+  --ent-save 1 \
+  --ent-native-model frozen \
+  --ent-native-source full \
+  --ent-NK 4 \
+  --ent-NT 9 \
+  --T 8.0 \
+  --npts 801 \
+  --fig-dpi 400 \
+  --fig-fontsize 11 \
+  --fig-cmap magma \
+  --fig-transparent 0 \
+  --no-show 1 | tee classical_control_x000_T8_jeener_packet_gaussian.log
+tag_ent classical_control_x000_T8_jeener_packet_gaussian
+\end{lstlisting}
+
+\subsection{Native benchmark}
+\begin{lstlisting}[style=bashstyle]
+python3 -u "$CODE" \
+  --mode eigen \
+  --kmax 0.03 \
+  --loops 0 \
+  --Nvec 0.30 0 0 \
+  --tip 0.05 \
+  --pattern staggered \
+  --ent 1 \
+  --ent-save 1 \
+  --ent-native-model frozen \
+  --ent-native-source full \
+  --ent-window 0.0:1.0 \
+  --ent-NK 13 \
+  --ent-NT 17 \
+  --T 8.0 \
+  --npts 2401 \
+  --fig-dpi 800 \
+  --fig-fontsize 12 \
+  --fig-cmap magma \
+  --fig-transparent 0 \
+  --no-show 1 | tee fig3_native_corr_x030_T8_jeener_packet_gaussian.log
+tag_ent fig3_native_corr_x030_T8_jeener_packet_gaussian
+\end{lstlisting}
+
+\subsection{Coherent \texorpdfstring{\(\sigma\)}{sigma} enhancement}
+\begin{lstlisting}[style=bashstyle]
+python3 -u "$CODE" \
+  --mode eigen \
+  --kmax 0.03 \
+  --loops 4 \
+  --sigma 2.00 5.00 10.00 \
+  --Nvec 0.30 0 0 \
+  --tip 0.05 \
+  --pattern staggered \
+  --ent 1 \
+  --ent-save 1 \
+  --ent-native-model frozen \
+  --ent-native-source full \
+  --ent-window 0.0:1.0 \
+  --ent-NK 13 \
+  --ent-NT 17 \
+  --T 8.0 \
+  --npts 2401 \
+  --fig-dpi 800 \
+  --fig-fontsize 12 \
+  --fig-cmap magma \
+  --fig-transparent 0 \
+  --no-show 1 | tee fig4_sigma_x030_T8_jeener_packet_gaussian.log
+tag_ent fig4_sigma_x030_T8_jeener_packet_gaussian
+\end{lstlisting}
+
+\subsection{Stronger coherent regime}
+\begin{lstlisting}[style=bashstyle]
+python3 -u "$CODE" \
+  --mode eigen \
+  --kmax 0.03 \
+  --loops 4 \
+  --alpha 5.00 5.00 5.00 5.00 \
+  --sigma 5.00 10.00 20.00 \
+  --kappa 5.00 10.00 20.00 \
+  --Nvec 0.30 0 0 \
+  --tip 0.05 \
+  --pattern staggered \
+  --ent 1 \
+  --ent-save 1 \
+  --ent-native-model frozen \
+  --ent-native-source full \
+  --ent-window 0.0:1.0 \
+  --ent-NK 13 \
+  --ent-NT 17 \
+  --T 8.0 \
+  --npts 2401 \
+  --fig-dpi 800 \
+  --fig-fontsize 12 \
+  --fig-cmap magma \
+  --fig-transparent 0 \
+  --no-show 1 | tee fig5_aggr_x030_T8_jeener_packet_gaussian.log
+tag_ent fig5_aggr_x030_T8_jeener_packet_gaussian
+\end{lstlisting}
+
+\subsection{Thermal suppression}
+\begin{lstlisting}[style=bashstyle]
+python3 -u "$CODE" \
+  --mode eigen \
+  --kmax 0.03 \
+  --loops 0 \
+  --Nvec 0.30 0 0 \
+  --tip 0.05 \
+  --pattern staggered \
+  --ent 1 \
+  --ent-save 1 \
+  --ent-native-model frozen \
+  --ent-native-source full \
+  --ent-native-nth 0.10 \
+  --ent-window 0.0:1.0 \
+  --ent-NK 13 \
+  --ent-NT 17 \
+  --T 8.0 \
+  --npts 2401 \
+  --fig-dpi 800 \
+  --fig-fontsize 12 \
+  --fig-cmap magma \
+  --fig-transparent 0 \
+  --no-show 1 | tee app_thermal_nth010_x030_T8_jeener_packet_gaussian.log
+tag_ent app_thermal_nth010_x030_T8_jeener_packet_gaussian
+\end{lstlisting}
+
+\subsection{Appendix control scans}
+\begin{lstlisting}[style=bashstyle]
+# sigma + kappa
+python3 -u "$CODE" --mode eigen --kmax 0.03 --loops 4 \
+  --sigma 2.00 5.00 10.00 --kappa 2.00 5.00 10.00 \
+  --Nvec 0.30 0 0 --tip 0.05 --pattern staggered \
+  --ent 1 --ent-save 1 --ent-native-model frozen --ent-native-source full \
+  --ent-window 0.0:1.0 --ent-NK 4 --ent-NT 9 \
+  --T 8.0 --npts 1601 --fig-dpi 600 --fig-fontsize 11 \
+  --fig-cmap magma --fig-transparent 0 --no-show 1 \
+  | tee app_sigma_kappa_x030_T8_jeener_packet_gaussian.log
+tag_ent app_sigma_kappa_x030_T8_jeener_packet_gaussian
+
+# alpha only
+python3 -u "$CODE" --mode eigen --kmax 0.03 --loops 4 \
+  --alpha 5.00 5.00 5.00 5.00 \
+  --Nvec 0.30 0 0 --tip 0.05 --pattern staggered \
+  --ent 1 --ent-save 1 --ent-native-model frozen --ent-native-source full \
+  --ent-window 0.0:1.0 --ent-NK 4 --ent-NT 9 \
+  --T 8.0 --npts 1601 --fig-dpi 600 --fig-fontsize 11 \
+  --fig-cmap magma --fig-transparent 0 --no-show 1 \
+  | tee app_alpha_only_x030_T8_jeener_packet_gaussian.log
+tag_ent app_alpha_only_x030_T8_jeener_packet_gaussian
+
+# kappa only
+python3 -u "$CODE" --mode eigen --kmax 0.03 --loops 4 \
+  --kappa 2.00 5.00 10.00 \
+  --Nvec 0.30 0 0 --tip 0.05 --pattern staggered \
+  --ent 1 --ent-save 1 --ent-native-model frozen --ent-native-source full \
+  --ent-window 0.0:1.0 --ent-NK 4 --ent-NT 9 \
+  --T 8.0 --npts 1601 --fig-dpi 600 --fig-fontsize 11 \
+  --fig-cmap magma --fig-transparent 0 --no-show 1 \
+  | tee app_kappa_only_x030_T8_jeener_packet_gaussian.log
+tag_ent app_kappa_only_x030_T8_jeener_packet_gaussian
+
+# beta only
+python3 -u "$CODE" --mode eigen --kmax 0.03 --loops 4 \
+  --beta 1.00 2.00 4.00 8.00 --beta-anis 0.50 \
+  --Nvec 0.30 0 0 --tip 0.05 --pattern staggered \
+  --ent 1 --ent-save 1 --ent-native-model frozen --ent-native-source full \
+  --ent-window 0.0:1.0 --ent-NK 4 --ent-NT 9 \
+  --T 8.0 --npts 1601 --fig-dpi 600 --fig-fontsize 11 \
+  --fig-cmap magma --fig-transparent 0 --no-show 1 \
+  | tee app_beta_only_x030_T8_jeener_packet_gaussian.log
+tag_ent app_beta_only_x030_T8_jeener_packet_gaussian
+\end{lstlisting}
+
+\subsection{Optional time-dependent validation runs}
+\begin{lstlisting}[style=bashstyle]
+python3 -u "$CODE" \
+  --mode eigen --kmax 0.03 --loops 0 \
+  --Nvec 0.30 0 0 --tip 0.05 --pattern staggered \
+  --ent 1 --ent-save 1 \
+  --ent-native-model linearized --ent-native-source full \
+  --ent-window 0.0:1.0 --ent-NK 9 --ent-NT 17 \
+  --T 8.0 --npts 2401 --fig-dpi 800 --fig-fontsize 12 \
+  --fig-cmap magma --fig-transparent 0 --no-show 1 \
+  | tee app_td_native_x030_T8_jeener_packet_gaussian.log
+tag_ent app_td_native_x030_T8_jeener_packet_gaussian
+
+python3 -u "$CODE" \
+  --mode eigen --kmax 0.03 --loops 4 \
+  --sigma 2.00 5.00 10.00 \
+  --Nvec 0.30 0 0 --tip 0.05 --pattern staggered \
+  --ent 1 --ent-save 1 \
+  --ent-native-model linearized --ent-native-source full \
+  --ent-window 0.0:1.0 --ent-NK 9 --ent-NT 17 \
+  --T 8.0 --npts 2401 --fig-dpi 800 --fig-fontsize 12 \
+  --fig-cmap magma --fig-transparent 0 --no-show 1 \
+  | tee app_td_sigma_x030_T8_jeener_packet_gaussian.log
+tag_ent app_td_sigma_x030_T8_jeener_packet_gaussian
+\end{lstlisting}
+
+\section{Representative Regression Values}
+Table~\ref{tab:regression} records representative endpoint values for the
+standard frozen native packet-Gaussian benchmark suite. These are useful for
+checking that a local run is in the expected numerical regime.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{L{0.33\textwidth}L{0.20\textwidth}L{0.20\textwidth}L{0.19\textwidth}}
+\toprule
+\textbf{Scenario} & \textbf{Pairwise endpoint} & \textbf{Multipartite endpoint} & \textbf{Comment} \\
+\midrule
+Invariant branch, \(\mathbf N=0\), loops \(=0\) & \(E_N=0\) & \(FI=0\) & Separable control. \\
+Native benchmark, \(\mathbf N=(0.30,0,0)\), loops \(=0\) & \(E_N \simeq 0.6468\) & \(FI \simeq 0.2394\) & Native signal. \\
+\(\sigma\)-enhanced coherent run & \(E_N \simeq 0.7349\) & \(FI \simeq 0.2631\) & Coherent enhancement. \\
+Stronger coherent regime & \(E_N \simeq 0.8091\) & \(FI \simeq 0.2787\) & Largest listed signal. \\
+Thermal run, \texttt{--ent-native-nth 0.10} & \(E_N \simeq 0.3838\) & \(FI \simeq 0.1873\) & Thermal suppression. \\
+\bottomrule
+\end{tabular}
+\caption{Representative high-\(k\), end-of-window values for the benchmark
+heatmaps. Small numerical differences may occur across Python, NumPy, SciPy, or
+Matplotlib environments, but the qualitative ordering should remain stable.}
+\label{tab:regression}
+\end{table}
+
+\section{Troubleshooting and Practical Notes}
+\begin{itemize}
+\item If \texttt{--loops} is nonzero but no loop coefficients are supplied, the code
+prints a warning because the loop-dressed spectra and entanglement diagnostics
+will look unchanged.
+\item For scripted runs, always use \texttt{--no-show 1}. This prevents Matplotlib
+from blocking execution.
+\item For reproducible output names, either run each command in a clean output
+directory with \texttt{--outdir}, or use the \texttt{tag\_ent} helper immediately
+after each command.
+\item Use \texttt{--Nvec} for new calculations. The magnitude/direction interface
+\texttt{--N0}/\texttt{--n\_hat} remains available for compatibility, but is less
+explicit.
+\item The \texttt{linearized} native model is slower than \texttt{frozen}; use it for
+validation or sensitivity checks rather than for the fastest benchmark sweep.
+\item If covariance regularization warnings appear, the reported entanglement is
+conservative because the repair adds isotropic noise before evaluating the
+Gaussian witnesses.
+\end{itemize}
+
+\section{Minimal Smoke Tests}
+The following checks are quick ways to confirm that the local executable is
+working:
+\begin{lstlisting}[style=bashstyle]
+python3 ./jeener_packet_gaussian.py --help
+
+python3 -u ./jeener_packet_gaussian.py \
+  --mode eigen --kmax 0.03 --loops 0 --Nvec 0 0 0 \
+  --ent 1 --ent-native-model frozen --ent-NK 2 --ent-NT 3 \
+  --T 1.0 --npts 101 --no-show 1
+
+python3 -u ./jeener_packet_gaussian.py \
+  --mode eigen --kmax 0.03 --loops 0 --Nvec 0.30 0 0 \
+  --ent 1 --ent-native-model frozen --ent-NK 2 --ent-NT 3 \
+  --T 1.0 --npts 101 --no-show 1
+\end{lstlisting}
+
+\end{document}
