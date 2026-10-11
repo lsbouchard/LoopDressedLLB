@@ -1,53 +1,22 @@
-# Release Checklist
+# Release Checks
 
-Use this checklist before pushing the repository to GitHub.
+Run from the repository root:
 
-1. Confirm the release source hash:
+```bash
+MPLBACKEND=Agg python -m unittest discover -s jeener-packet-gaussian-python/tests
+make -C jeener-packet-gaussian-c test
+git diff --check
+```
 
-   ```bash
-   shasum -a 256 src/jeener_packet_gaussian/simulator.py
-   ```
+Before publishing:
 
-   Expected:
+1. Review `AUDIT.md`, including the unresolved paper null control.
+2. Confirm that current regression values match the documented aggregation.
+3. Check the version and authors in both `CITATION.cff` files.
+4. Rebuild the PDF manual when its LaTeX source changes.
+5. Keep the non-commercial license and as-is, no-support terms with both codebases.
+6. Review the commit diff and platform test results before merging.
 
-   ```text
-   4892b31a6bb43573c0c5051fbe5f587aa3caef14966adf51a26fc6be889c5722
-   ```
-
-2. Run the tests:
-
-   ```bash
-   python -m unittest discover -s tests
-   ```
-
-3. Run a command-line execution test:
-
-   ```bash
-   python -m jeener_packet_gaussian --help
-   ```
-
-4. Review the license.
-
-   `LICENSE` permits non-commercial research, educational, and scholarly use
-   only. It disclaims warranties and states that no technical support is
-   provided.
-
-5. Update `CITATION.cff`.
-
-   Add the PRA DOI if desired.
-
-6. Create a clean initial Git history:
-
-   ```bash
-   git init
-   git add .
-   git commit -m "Freeze Jeener packet Gaussian codebase"
-   ```
-
-7. Push to GitHub:
-
-   ```bash
-   git branch -M main
-   git remote add origin git@github.com:<OWNER>/jeener-packet-gaussian.git
-   git push -u origin main
-   ```
+The historical source is preserved by Git history. A matching source hash or
+agreement between two implementations is not a substitute for mathematical
+control tests.

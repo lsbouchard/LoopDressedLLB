@@ -1,15 +1,16 @@
 #include "jpg.h"
 
 #include <math.h>
+#include <complex.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-extern void dgeev_(char *jobvl, char *jobvr, int *n, double *a, int *lda,
-                   double *wr, double *wi, double *vl, int *ldvl,
-                   double *vr, int *ldvr, double *work, int *lwork, int *info);
+extern void dpotrf_(char *uplo, int *n, double *a, int *lda, int *info);
+extern void zheev_(char *job, char *uplo, int *n, double complex *a, int *lda,
+                   double *w, double complex *work, int *lwork, double *rwork, int *info);
 
 enum { N = JPG_N_SPINS, SD = JPG_STATE_DIM, CD = JPG_COV_DIM };
 
@@ -82,11 +83,11 @@ static double mat_norm1(const double *A, int n) {
 }
 
 static void mat_mul(const double *A, const double *B, double *C, int n) {
+    mat_zero(C, n, n);
     for (int i = 0; i < n; i++) {
-        for (int j = 0; j < n; j++) {
-            double s = 0.0;
-            for (int k = 0; k < n; k++) s += A[i*n + k] * B[k*n + j];
-            C[i*n + j] = s;
+        for (int k = 0; k < n; k++) {
+            double a = A[i*n+k];
+            for (int j = 0; j < n; j++) C[i*n+j] += a*B[k*n+j];
         }
     }
 }
@@ -107,17 +108,17 @@ static void mat_symmetrize(double *A, int n) {
     }
 }
 
-static void mat_expm_taylor(const double *A, int n, double *E) {
+static int mat_expm_taylor(const double *A, int n, double *E) {
+    if (n < 1 || n > 2*CD) return 1;
+    for (int i = 0; i < n*n; i++) if (!isfinite(A[i])) return 1;
     double norm = mat_norm1(A, n);
+    if (!isfinite(norm)) return 1;
     int s = 0;
     if (norm > 0.5) s = (int)ceil(log(norm / 0.5) / log(2.0));
     if (s < 0) s = 0;
     double scale = ldexp(1.0, -s);
 
-    double *B = calloc((size_t)n*n, sizeof(double));
-    double *term = calloc((size_t)n*n, sizeof(double));
-    double *tmp = calloc((size_t)n*n, sizeof(double));
-    if (!B || !term || !tmp) abort();
+    double B[4*CD*CD], term[4*CD*CD], tmp[4*CD*CD];
     for (int i = 0; i < n*n; i++) B[i] = A[i] * scale;
     mat_eye(E, n);
     mat_eye(term, n);
@@ -136,15 +137,8 @@ static void mat_expm_taylor(const double *A, int n, double *E) {
         mat_mul(E, E, tmp, n);
         mat_copy(E, tmp, n, n);
     }
-    free(B);
-    free(term);
-    free(tmp);
-}
-
-static int cmp_double(const void *a, const void *b) {
-    double x = *(const double *)a;
-    double y = *(const double *)b;
-    return (x > y) - (x < y);
+    for (int i = 0; i < n*n; i++) if (!isfinite(E[i])) return 1;
+    return 0;
 }
 
 static void init_geometry(void) {
@@ -329,7 +323,7 @@ static void rhs_mn(const jpg_loop_config *cfg, const double y[SD], double k,
     for (int j = 0; j < N; j++) {
         double Bm[3] = {k * BjM[j][0], k * BjM[j][1], B_INH[j] + Bshift[j] + k * BjM[j][2]};
         double kNa = cfg->dynamic_mix ? k * sqrt(dmax(vdot3(Nv[j], Nv[j]), 0.0)) : k * n_amp_base;
-        kNa = dmin(kNa, 2.0);
+        if (cfg->dynamic_mix) kNa = dmin(kNa, 2.0);
         double Bn[3] = {-kNa * BjN[j][0], -kNa * BjN[j][1], -kNa * BjN[j][2]};
         double nb = vnorm3(Bn);
         if (nb > 10.0) for (int a = 0; a < 3; a++) Bn[a] *= 10.0 / nb;
@@ -384,6 +378,14 @@ static void state_tangent_basis(const double y[SD], double inject[SD*CD], double
             proj[cm*(3*N) + 3*j+a] = e1[a] / scale;
             proj[(cm+1)*(3*N) + 3*j+a] = e2[a] / scale;
         }
+        /* Rotate the response with M so the injected displacement is tangent. */
+        const double *Nv = y + 3*N + 3*j;
+        double d1 = scale*vdot3(Nv, e1)/vdot3(m, m);
+        double d2 = scale*vdot3(Nv, e2)/vdot3(m, m);
+        for (int a = 0; a < 3; a++) {
+            inject[(3*N+3*j+a)*CD+cm] = -m[a]*d1;
+            inject[(3*N+3*j+a)*CD+cm+1] = -m[a]*d2;
+        }
     }
 }
 
@@ -431,8 +433,9 @@ static void packet_diffusion_matrix(const jpg_options *opt, const double y[SD], 
     double therm = 2.0 * dmax(opt->native_nbath, 0.0) + 1.0;
     for (int j = 0; j < N; j++) {
         int blk = 2*j;
-        double lamx = dmax(lam[j] * (1.0 + opt->loop.beta_anis), 0.0);
-        double lamy = dmax(lam[j] * (1.0 - opt->loop.beta_anis), 0.0);
+        double rate = dmax(lam[j], 0.0);
+        double lamx = dmax(rate * (1.0 + opt->loop.beta_anis), 0.0);
+        double lamy = dmax(rate * (1.0 - opt->loop.beta_anis), 0.0);
         double Dlab[3][3] = {{therm*lamx,0,0},{0,therm*lamy,0},{0,0,0}};
         for (int a = 0; a < 2; a++) {
             for (int b = 0; b < 2; b++) {
@@ -450,26 +453,19 @@ static void packet_diffusion_matrix(const jpg_options *opt, const double y[SD], 
     (void)Bshift;
 }
 
-static int exact_step_operator(const jpg_options *opt, const double y[SD], double k, double dt,
+static int gaussian_step(const double A[CD*CD], const double D[CD*CD], double dt,
                                double Phi[CD*CD], double Qd[CD*CD], int *has_qd) {
-    double A[CD*CD], D[CD*CD];
-    packet_drift_matrix(opt, y, k, A);
-    packet_diffusion_matrix(opt, y, k, D);
     double dnorm = mat_norm1(D, CD);
     if (dnorm < 1e-18) {
         double Adt[CD*CD];
         for (int i = 0; i < CD*CD; i++) Adt[i] = A[i] * dt;
-        mat_expm_taylor(Adt, CD, Phi);
+        if (mat_expm_taylor(Adt, CD, Phi)) return 1;
         mat_zero(Qd, CD, CD);
         *has_qd = 0;
         return 0;
     }
     int n2 = 2 * CD;
-    double *M = calloc((size_t)n2*n2, sizeof(double));
-    double *E = calloc((size_t)n2*n2, sizeof(double));
-    double *top = calloc((size_t)CD*CD, sizeof(double));
-    double *PT = calloc((size_t)CD*CD, sizeof(double));
-    if (!M || !E || !top || !PT) abort();
+    double M[4*CD*CD] = {0}, E[4*CD*CD], top[CD*CD], PT[CD*CD];
     for (int i = 0; i < CD; i++) {
         for (int j = 0; j < CD; j++) {
             M[i*n2 + j] = A[i*CD + j];
@@ -478,7 +474,7 @@ static int exact_step_operator(const jpg_options *opt, const double y[SD], doubl
         }
     }
     for (int i = 0; i < n2*n2; i++) M[i] *= dt;
-    mat_expm_taylor(M, n2, E);
+    if (mat_expm_taylor(M, n2, E)) return 1;
     for (int i = 0; i < CD; i++) {
         for (int j = 0; j < CD; j++) {
             Phi[i*CD + j] = E[i*n2 + j];
@@ -489,7 +485,6 @@ static int exact_step_operator(const jpg_options *opt, const double y[SD], doubl
     mat_mul(top, PT, Qd, CD);
     mat_symmetrize(Qd, CD);
     *has_qd = 1;
-    free(M); free(E); free(top); free(PT);
     return 0;
 }
 
@@ -514,47 +509,45 @@ static void symplectic_form(double *Om, int nm) {
     }
 }
 
+static int hermitian_eigs(double complex *A, int n, double *w) {
+    double complex work[64*CD];
+    double rwork[3*CD];
+    int lwork = 64*CD, info = 0;
+    char job = 'N', uplo = 'L';
+    if (n < 1 || n > CD) return 1;
+    for (int i = 0; i < n*n; i++)
+        if (!isfinite(creal(A[i])) || !isfinite(cimag(A[i]))) return 1;
+    zheev_(&job, &uplo, &n, A, &n, w, work, &lwork, rwork, &info);
+    return info;
+}
+
 static int symplectic_eigs(const double *V, int nm, double *nu) {
-    int n = 2 * nm;
-    double *Om = calloc((size_t)n*n, sizeof(double));
-    double *B = calloc((size_t)n*n, sizeof(double));
-    double *A;
-    if (!Om || !B) abort();
-    symplectic_form(Om, nm);
-    mat_mul(Om, V, B, n);
-    A = calloc((size_t)n*n, sizeof(double));
-    if (!A) abort();
+    int n = 2*nm, info = 0;
+    double L[CD*CD], w[CD];
+    double complex H[CD*CD];
+    char uplo = 'L';
+    if (nm < 1 || nm > N) return 1;
     for (int r = 0; r < n; r++)
-        for (int c = 0; c < n; c++)
-            A[c*n + r] = B[r*n + c];
-    double *wr = calloc((size_t)n, sizeof(double));
-    double *wi = calloc((size_t)n, sizeof(double));
-    if (!wr || !wi) abort();
-    double wkopt;
-    int lda = n, ldvl = 1, ldvr = 1, lwork = -1, info;
-    char job = 'N';
-    double dummy_vl[1], dummy_vr[1];
-    dgeev_(&job, &job, &n, A, &lda, wr, wi, dummy_vl, &ldvl, dummy_vr, &ldvr, &wkopt, &lwork, &info);
-    lwork = (int)wkopt;
-    if (lwork < 4*n) lwork = 4*n;
-    double *work = calloc((size_t)lwork, sizeof(double));
+        for (int c = 0; c < n; c++) {
+            L[c*n+r] = 0.5*(V[r*n+c] + V[c*n+r]);
+            if (!isfinite(L[c*n+r])) return 1;
+        }
+    dpotrf_(&uplo, &n, L, &n, &info);
+    if (info) return info;
+    for (int c = 0; c < n; c++)
+        for (int r = 0; r < c; r++) L[c*n+r] = 0;
+    /* i L^T Omega L is Hermitian and has the Williamson eigenvalues +/- nu. */
     for (int r = 0; r < n; r++)
-        for (int c = 0; c < n; c++)
-            A[c*n + r] = B[r*n + c];
-    dgeev_(&job, &job, &n, A, &lda, wr, wi, dummy_vl, &ldvl, dummy_vr, &ldvr, work, &lwork, &info);
-    double *mags = calloc((size_t)n, sizeof(double));
-    if (!mags) abort();
-    for (int i = 0; i < n; i++) mags[i] = hypot(wr[i], wi[i]);
-    qsort(mags, (size_t)n, sizeof(double), cmp_double);
-    for (int i = 0; i < nm; i++) nu[i] = 0.5 * (mags[2*i] + mags[2*i + 1]);
-    free(Om);
-    free(B);
-    free(A);
-    free(work);
-    free(wr);
-    free(wi);
-    free(mags);
-    return info == 0 ? 0 : info;
+        for (int c = 0; c < n; c++) {
+            double sum = 0;
+            for (int j = 0; j < nm; j++)
+                sum += L[r*n+2*j]*L[c*n+2*j+1] - L[r*n+2*j+1]*L[c*n+2*j];
+            H[c*n+r] = I*sum;
+        }
+    info = hermitian_eigs(H, n, w);
+    if (info) return info;
+    for (int j = 0; j < nm; j++) nu[j] = 0.5*(w[nm+j] - w[nm-1-j]);
+    return 0;
 }
 
 static void subcov(const double *V, const int *modes, int nm, double *S) {
@@ -582,40 +575,45 @@ static void partial_transpose(double *V, int nm, int mode) {
 }
 
 static double physicality_margin(const double *V, int nm) {
-    double *nu = calloc((size_t)nm, sizeof(double));
-    if (!nu) abort();
-    if (symplectic_eigs(V, nm, nu) != 0) {
-        free(nu);
-        return -1e9;
+    int n = 2*nm;
+    double complex H[CD*CD];
+    double w[CD];
+    if (nm < 1 || nm > N) return NAN;
+    for (int r = 0; r < n; r++)
+        for (int c = 0; c < n; c++)
+            H[c*n+r] = 0.5*(V[r*n+c] + V[c*n+r]);
+    for (int j = 0; j < nm; j++) {
+        H[(2*j+1)*n+2*j] += 0.5*I;
+        H[(2*j)*n+2*j+1] -= 0.5*I;
     }
-    double mn = nu[0];
-    for (int i = 1; i < nm; i++) mn = dmin(mn, nu[i]);
-    free(nu);
-    return mn - 0.5;
+    return hermitian_eigs(H, n, w) ? NAN : w[0];
 }
 
 static double regularize(double *V, int nm) {
     int n = 2 * nm;
     double margin = physicality_margin(V, nm);
-    if (margin >= 0.0) return 0.0;
+    if (!isfinite(margin)) return NAN;
+    if (margin >= -1e-10) return 0.0;
     double delta = -margin + 1e-9;
     for (int i = 0; i < n; i++) V[i*n + i] += delta;
     return delta;
 }
 
-static void logneg_cov(const double *V, int nm, int pt_mode, double *nu_min, double *ln) {
+static int logneg_cov(const double *V, int nm, int pt_mode, double *nu_min, double *ln) {
     int n = 2 * nm;
     double W[64], nu[4];
+    if (nm < 1 || nm > 4 || pt_mode < 0 || pt_mode >= nm) return 1;
     mat_copy(W, V, n, n);
     partial_transpose(W, nm, pt_mode);
-    symplectic_eigs(W, nm, nu);
+    if (symplectic_eigs(W, nm, nu)) return 1;
     *nu_min = nu[0];
     *ln = 0.0;
     for (int i = 0; i < nm; i++) {
         double val = 2.0 * dmax(nu[i], 1e-16);
         double add = -log(val) / log(2.0);
-        if (add > 0.0) *ln += add;
+        if (nu[i] < 0.5 - 1e-10 && add > 0.0) *ln += add;
     }
+    return 0;
 }
 
 static double duan_pair(const double V[16]) {
@@ -631,54 +629,87 @@ static double duan_pair(const double V[16]) {
     return se + sf;
 }
 
-static void row_metrics_for_cov(const double Vfull[CD*CD], double *pair_ln, double *pair_nu,
+static int row_metrics_for_cov(const double Vfull[CD*CD], int aggregate_mean,
+                                double *pair_ln, double *pair_nu,
                                 double *pair_du, double *multi_ln, double *multi_fi,
                                 double *multi_nu, double *added_noise) {
     double V[CD*CD];
     mat_copy(V, Vfull, CD, CD);
     *added_noise = regularize(V, N);
+    if (!isfinite(*added_noise)) return 1;
 
     *pair_ln = 0.0;
-    *pair_nu = 1e100;
-    *pair_du = 1e100;
+    *pair_nu = aggregate_mean ? 0.0 : INFINITY;
+    *pair_du = aggregate_mean ? 0.0 : INFINITY;
     for (int p = 0; p < 12; p++) {
         int modes[2] = {PAIRS[p][0], PAIRS[p][1]};
         double S[16], nu, ln;
         subcov(V, modes, 2, S);
-        logneg_cov(S, 2, 0, &nu, &ln);
+        if (logneg_cov(S, 2, 0, &nu, &ln)) return 1;
         double du = duan_pair(S);
-        if (ln > *pair_ln) *pair_ln = ln;
-        if (nu < *pair_nu) *pair_nu = nu;
-        if (du < *pair_du) *pair_du = du;
+        if (aggregate_mean) {
+            *pair_ln += ln/12.0;
+            *pair_nu += nu/12.0;
+            *pair_du += du/12.0;
+        } else {
+            *pair_ln = dmax(*pair_ln, ln);
+            *pair_nu = dmin(*pair_nu, nu);
+            *pair_du = dmin(*pair_du, du);
+        }
     }
 
     *multi_ln = 0.0;
     *multi_fi = 0.0;
-    *multi_nu = 1e100;
+    *multi_nu = aggregate_mean ? 0.0 : INFINITY;
     for (int a = 0; a < N - 2; a++) {
         for (int b = a + 1; b < N - 1; b++) {
             for (int c = b + 1; c < N; c++) {
                 int modes[3] = {a,b,c};
                 double S[36], nu, ln;
                 subcov(V, modes, 3, S);
-                logneg_cov(S, 3, 0, &nu, &ln);
-                double fi = dmax(0.0, 0.5 - nu);
-                if (ln > *multi_ln) *multi_ln = ln;
-                if (fi > *multi_fi) *multi_fi = fi;
-                if (nu < *multi_nu) *multi_nu = nu;
+                double worst_nu = 0.0, weakest_ln = INFINITY;
+                for (int mode = 0; mode < 3; mode++) {
+                    if (logneg_cov(S, 3, mode, &nu, &ln)) return 1;
+                    worst_nu = dmax(worst_nu, nu);
+                    weakest_ln = dmin(weakest_ln, ln);
+                }
+                double fi = worst_nu < 0.5 - 1e-10 ? 0.5 - worst_nu : 0.0;
+                if (aggregate_mean) {
+                    *multi_ln += weakest_ln/56.0;
+                    *multi_fi += fi/56.0;
+                    *multi_nu += worst_nu/56.0;
+                } else {
+                    *multi_ln = dmax(*multi_ln, weakest_ln);
+                    *multi_fi = dmax(*multi_fi, fi);
+                    *multi_nu = dmin(*multi_nu, worst_nu);
+                }
             }
         }
     }
+    return 0;
 }
 
 typedef struct {
     const jpg_options *opt;
     jpg_result *res;
     int next;
+    int failed;
     pthread_mutex_t lock;
 } work_state;
 
-static void compute_row(const jpg_options *opt, int ik, jpg_row_result *row) {
+static double generator_cp_margin(const double A[CD*CD], const double D[CD*CD]) {
+    double Om[CD*CD], AO[CD*CD], w[CD];
+    double complex H[CD*CD];
+    symplectic_form(Om, N);
+    mat_mul(A, Om, AO, CD);
+    for (int r = 0; r < CD; r++)
+        for (int c = 0; c < CD; c++)
+            H[c*CD+r] = D[r*CD+c] - 0.5*I*(AO[r*CD+c] - AO[c*CD+r]);
+    return hermitian_eigs(H, CD, w) ? NAN : w[0];
+}
+
+static int compute_row(const jpg_options *opt, int ik, jpg_row_result *row) {
+    memset(row, 0, sizeof(*row));
     double k = opt->ent_nk <= 1 ? 0.0 : opt->kmax * (double)ik / (double)(opt->ent_nk - 1);
     row->k = k;
     int start = (int)(opt->ent_window0 * (double)(opt->npts - 1));
@@ -686,16 +717,24 @@ static void compute_row(const jpg_options *opt, int ik, jpg_row_result *row) {
     if (end < start) end = start;
     int t_idx[JPG_MAX_T];
     for (int jt = 0; jt < opt->ent_nt; jt++) {
-        double u = opt->ent_nt <= 1 ? 0.0 : (double)jt / (double)(opt->ent_nt - 1);
-        t_idx[jt] = (int)((double)start + u * (double)(end - start));
+        double step = opt->ent_nt <= 1 ? 0.0 : (double)(end-start)/(double)(opt->ent_nt-1);
+        t_idx[jt] = (int)((double)start + jt*step);
+        if (opt->ent_nt > 1 && jt == opt->ent_nt-1) t_idx[jt] = end;
     }
 
     double y[SD], Phi[CD*CD], Qd[CD*CD], V[CD*CD];
     int has_qd = 0;
     initial_state(opt, y);
     renorm_state(y);
+    double response_max = 0;
+    for (int j = 0; j < N; j++) response_max = dmax(response_max, vnorm3(y+3*N+3*j));
+    row->response_invariant = response_max <= 1e-15;
     double dt = opt->total_time / (double)(opt->npts - 1);
-    exact_step_operator(opt, y, k, dt, Phi, Qd, &has_qd);
+    double A[CD*CD], D[CD*CD];
+    packet_drift_matrix(opt, y, k, A);
+    packet_diffusion_matrix(opt, y, k, D);
+    row->generator_cp_margin = generator_cp_margin(A, D);
+    if (!isfinite(row->generator_cp_margin)) return 1;
 
     mat_zero(V, CD, CD);
     double qv = dmax(opt->native_nth, 0.0) + 0.5;
@@ -706,11 +745,27 @@ static void compute_row(const jpg_options *opt, int ik, jpg_row_result *row) {
     double pair_sum = 0, multi_sum = 0;
     double pair_nu_min = 1e100, pair_du_min = 1e100, multi_nu_min = 1e100;
     double add_max = 0.0;
-    int ti = 0, jt = 0, count = 0;
-    while (jt < opt->ent_nt) {
-        if (ti == t_idx[jt]) {
+    int ti = 0, count = 0, cached_gap = -1;
+    row->uncertainty_margin_min = INFINITY;
+    for (int jt = 0; jt < opt->ent_nt; jt++) {
+        int gap = t_idx[jt] - ti;
+        if (gap) {
+            if (gap != cached_gap) {
+                if (gaussian_step(A, D, gap*dt, Phi, Qd, &has_qd)) return 1;
+                cached_gap = gap;
+            }
+            cov_step(V, Phi, Qd, has_qd);
+        }
+        ti = t_idx[jt];
+        double margin = physicality_margin(V, N);
+        if (!isfinite(margin)) return 1;
+        row->uncertainty_margin_min = dmin(row->uncertainty_margin_min, margin);
+        {
             double pln, pnu, pdu, mln, mfi, mnu, add;
-            row_metrics_for_cov(V, &pln, &pnu, &pdu, &mln, &mfi, &mnu, &add);
+            if (row_metrics_for_cov(V, opt->aggregate_mean, &pln, &pnu, &pdu, &mln, &mfi, &mnu, &add)) return 1;
+            add_max = dmax(add_max, add);
+            if (row->response_invariant && (pln > 1e-10 || mfi > 1e-10)) row->null_control_violation = 1;
+            if (add > opt->reg_warn || row->generator_cp_margin < -1e-8) continue;
             pair_end = pln;
             multi_end = mfi;
             pair_best = dmax(pair_best, pln);
@@ -720,13 +775,8 @@ static void compute_row(const jpg_options *opt, int ik, jpg_row_result *row) {
             pair_nu_min = dmin(pair_nu_min, pnu);
             pair_du_min = dmin(pair_du_min, pdu);
             multi_nu_min = dmin(multi_nu_min, mnu);
-            add_max = dmax(add_max, add);
             count++;
-            jt++;
         }
-        if (ti >= opt->npts - 1) break;
-        cov_step(V, Phi, Qd, has_qd);
-        ti++;
     }
 
     row->pair_end = pair_end;
@@ -739,6 +789,14 @@ static void compute_row(const jpg_options *opt, int ik, jpg_row_result *row) {
     row->multi_mean = count > 0 ? multi_sum / count : 0.0;
     row->multi_nu_min = multi_nu_min;
     row->added_noise_max = add_max;
+    row->valid_count = count;
+    row->sample_count = opt->ent_nt;
+    if (!count) {
+        row->pair_end = row->pair_best = row->pair_mean = NAN;
+        row->pair_nu_min = row->pair_duan_min = NAN;
+        row->multi_end = row->multi_best = row->multi_mean = row->multi_nu_min = NAN;
+    }
+    return 0;
 }
 
 static void *worker_main(void *arg) {
@@ -748,19 +806,42 @@ static void *worker_main(void *arg) {
         int ik = ws->next++;
         pthread_mutex_unlock(&ws->lock);
         if (ik >= ws->opt->ent_nk) break;
-        compute_row(ws->opt, ik, &ws->res->rows[ik]);
+        if (compute_row(ws->opt, ik, &ws->res->rows[ik])) {
+            pthread_mutex_lock(&ws->lock);
+            ws->failed = 1;
+            pthread_mutex_unlock(&ws->lock);
+        }
     }
     return NULL;
 }
 
 int jpg_run_benchmark(const jpg_options *opt_in, jpg_result *out) {
+    if (!opt_in || !out) return 1;
     ensure_init();
     jpg_options opt = *opt_in;
     if (opt.ent_nk < 1 || opt.ent_nk > JPG_MAX_K) return 2;
     if (opt.ent_nt < 1 || opt.ent_nt > JPG_MAX_T) return 3;
     if (opt.npts < 2) return 4;
-    if (opt.loop.loops < 0) opt.loop.loops = 0;
-    if (opt.loop.loops > 4) opt.loop.loops = 4;
+    if (opt.loop.loops < 0 || opt.loop.loops > 4 || opt.threads < 0) return 4;
+    if (!isfinite(opt.kmax) || opt.kmax < 0 || !isfinite(opt.total_time) || opt.total_time < 0
+        || !isfinite(opt.tip) || !isfinite(opt.native_nth) || opt.native_nth < 0
+        || !isfinite(opt.native_nbath) || opt.native_nbath < 0
+        || !isfinite(opt.reg_warn) || opt.reg_warn < 0
+        || !isfinite(opt.ent_window0) || !isfinite(opt.ent_window1)
+        || opt.ent_window0 < 0 || opt.ent_window1 > 1 || opt.ent_window1 < opt.ent_window0
+        || (opt.pattern != 0 && opt.pattern != 1)
+        || (opt.aggregate_mean != 0 && opt.aggregate_mean != 1)
+        || (opt.loop.dynamic_mix != 0 && opt.loop.dynamic_mix != 1)) return 4;
+    for (int a = 0; a < 3; a++) if (!isfinite(opt.nvec[a])) return 4;
+    double mhat[3] = {0, -sin(opt.tip), cos(opt.tip)}, nperp[3];
+    double parallel = vdot3(opt.nvec, mhat);
+    for (int a = 0; a < 3; a++) nperp[a] = opt.nvec[a] - parallel*mhat[a];
+    if (!isfinite(vnorm3(nperp)) || vnorm3(nperp) >= 1.0) return 4;
+    if (!isfinite(opt.loop.alpha_k2) || !isfinite(opt.loop.beta_k2)
+        || !isfinite(opt.loop.beta_anis)) return 4;
+    for (int a = 0; a < 5; a++)
+        if (!isfinite(opt.loop.alpha[a]) || !isfinite(opt.loop.beta[a])
+            || !isfinite(opt.loop.sigma[a]) || !isfinite(opt.loop.kappa[a])) return 4;
 
     out->nk = opt.ent_nk;
     out->nt = opt.ent_nt;
@@ -777,20 +858,55 @@ int jpg_run_benchmark(const jpg_options *opt_in, jpg_result *out) {
     ws.opt = &opt;
     ws.res = out;
     ws.next = 0;
-    pthread_mutex_init(&ws.lock, NULL);
+    ws.failed = 0;
+    if (pthread_mutex_init(&ws.lock, NULL)) return 5;
     pthread_t *th = calloc((size_t)threads, sizeof(pthread_t));
-    if (!th) abort();
-    for (int i = 0; i < threads; i++) pthread_create(&th[i], NULL, worker_main, &ws);
-    for (int i = 0; i < threads; i++) pthread_join(th[i], NULL);
+    int created = 0;
+    if (th) {
+        for (; created < threads; created++)
+            if (pthread_create(&th[created], NULL, worker_main, &ws)) break;
+    }
+    if (created < threads) worker_main(&ws);
+    for (int i = 0; i < created; i++) {
+        if (pthread_join(th[i], NULL)) {
+            pthread_mutex_lock(&ws.lock);
+            ws.failed = 1;
+            pthread_mutex_unlock(&ws.lock);
+        }
+    }
     free(th);
     pthread_mutex_destroy(&ws.lock);
-    return 0;
+    return ws.failed ? 5 : 0;
+}
+
+static void json_number(const char *key, double value, int comma) {
+    printf("\"%s\": ", key);
+    if (isfinite(value)) printf("%.17g", value);
+    else printf("null");
+    if (comma) printf(", ");
 }
 
 void jpg_print_json(const jpg_options *opt, const jpg_result *res) {
     printf("{\n");
     printf("  \"program\": \"jeener_packet_c\",\n");
     printf("  \"model\": \"frozen-native-packet-gaussian\",\n");
+    printf("  \"schema_version\": 2,\n");
+    printf("  \"interpretation\": \"computed covariance; paper null-control discrepancy unresolved\",\n");
+    printf("  \"aggregate\": \"%s\",\n", opt->aggregate_mean ? "mean" : "max");
+    printf("  \"backend\": \"cpu-pthreads\",\n");
+    printf("  \"parameters\": {\"kmax\": %.17g, \"T\": %.17g, \"npts\": %d, \"tip\": %.17g, "
+           "\"pattern\": \"%s\", \"window\": [%.17g, %.17g], \"nth\": %.17g, \"nbath\": %.17g, "
+           "\"reg_warn\": %.17g, \"dynamic_mix\": %d, \"alpha_k2\": %.17g, \"beta_k2\": %.17g, \"beta_anis\": %.17g, ",
+           opt->kmax, opt->total_time, opt->npts, opt->tip, opt->pattern ? "uniform" : "staggered",
+           opt->ent_window0, opt->ent_window1, opt->native_nth, opt->native_nbath, opt->reg_warn,
+           opt->loop.dynamic_mix, opt->loop.alpha_k2, opt->loop.beta_k2, opt->loop.beta_anis);
+    const char *channels[] = {"alpha", "beta", "sigma", "kappa"};
+    const double *coeffs[] = {opt->loop.alpha, opt->loop.beta, opt->loop.sigma, opt->loop.kappa};
+    for (int c = 0; c < 4; c++) {
+        printf("\"%s\": [", channels[c]);
+        for (int j = c == 3 ? 2 : 1; j <= 4; j++) printf("%.17g%s", coeffs[c][j], j == 4 ? "" : ", ");
+        printf("]%s", c == 3 ? "},\n" : ", ");
+    }
     printf("  \"nvec\": [%.17g, %.17g, %.17g],\n", opt->nvec[0], opt->nvec[1], opt->nvec[2]);
     printf("  \"loops\": %d,\n", opt->loop.loops);
     printf("  \"ent_nk\": %d,\n", res->nk);
@@ -798,29 +914,38 @@ void jpg_print_json(const jpg_options *opt, const jpg_result *res) {
     printf("  \"rows\": [\n");
     for (int i = 0; i < res->nk; i++) {
         const jpg_row_result *r = &res->rows[i];
-        printf("    {\"k\": %.17g, \"pair_end\": %.17g, \"pair_best\": %.17g, \"pair_mean\": %.17g, "
-               "\"pair_nu_min\": %.17g, \"pair_duan_min\": %.17g, "
-               "\"multi_end\": %.17g, \"multi_best\": %.17g, \"multi_mean\": %.17g, "
-               "\"multi_nu_min\": %.17g, \"added_noise_max\": %.17g}%s\n",
-               r->k, r->pair_end, r->pair_best, r->pair_mean, r->pair_nu_min, r->pair_duan_min,
-               r->multi_end, r->multi_best, r->multi_mean, r->multi_nu_min, r->added_noise_max,
-               i == res->nk - 1 ? "" : ",");
+        const char *keys[] = {"k", "pair_end", "pair_best", "pair_mean", "pair_nu_min", "pair_duan_min",
+            "multi_end", "multi_best", "multi_mean", "multi_nu_min", "added_noise_max",
+            "uncertainty_margin_min", "generator_cp_margin"};
+        double vals[] = {r->k, r->pair_end, r->pair_best, r->pair_mean, r->pair_nu_min, r->pair_duan_min,
+            r->multi_end, r->multi_best, r->multi_mean, r->multi_nu_min, r->added_noise_max,
+            r->uncertainty_margin_min, r->generator_cp_margin};
+        printf("    {");
+        for (size_t j = 0; j < sizeof(vals)/sizeof(vals[0]); j++) json_number(keys[j], vals[j], 1);
+        printf("\"valid_count\": %d, \"sample_count\": %d, \"response_invariant\": %s, \"null_control_violation\": %s}%s\n",
+            r->valid_count, r->sample_count, r->response_invariant ? "true" : "false",
+            r->null_control_violation ? "true" : "false", i == res->nk - 1 ? "" : ",");
     }
     const jpg_row_result *last = &res->rows[res->nk - 1];
     printf("  ],\n");
-    printf("  \"summary\": {\"pair_endpoint\": %.17g, \"pair_mean_endpoint_row\": %.17g, "
-           "\"multi_endpoint\": %.17g, \"multi_mean_endpoint_row\": %.17g}\n",
-           last->pair_end, last->pair_mean, last->multi_end, last->multi_mean);
+    printf("  \"summary\": {");
+    json_number("pair_endpoint", last->pair_end, 1);
+    json_number("pair_mean_endpoint_row", last->pair_mean, 1);
+    json_number("multi_endpoint", last->multi_end, 1);
+    json_number("multi_mean_endpoint_row", last->multi_mean, 0);
+    printf("}\n");
     printf("}\n");
 }
 
 void jpg_print_csv(const jpg_options *opt, const jpg_result *res) {
     (void)opt;
-    printf("k,pair_end,pair_best,pair_mean,pair_nu_min,pair_duan_min,multi_end,multi_best,multi_mean,multi_nu_min,added_noise_max\n");
+    printf("k,pair_end,pair_best,pair_mean,pair_nu_min,pair_duan_min,multi_end,multi_best,multi_mean,multi_nu_min,added_noise_max,uncertainty_margin_min,generator_cp_margin,valid_count,sample_count,response_invariant,null_control_violation\n");
     for (int i = 0; i < res->nk; i++) {
         const jpg_row_result *r = &res->rows[i];
-        printf("%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g\n",
+        printf("%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d,%d,%d,%d\n",
                r->k, r->pair_end, r->pair_best, r->pair_mean, r->pair_nu_min, r->pair_duan_min,
-               r->multi_end, r->multi_best, r->multi_mean, r->multi_nu_min, r->added_noise_max);
+               r->multi_end, r->multi_best, r->multi_mean, r->multi_nu_min, r->added_noise_max,
+               r->uncertainty_margin_min, r->generator_cp_margin, r->valid_count, r->sample_count,
+               r->response_invariant, r->null_control_violation);
     }
 }

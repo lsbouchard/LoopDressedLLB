@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 *.o
+*.d
 *.egg-info/
 .venv/
 .mplconfig-test/

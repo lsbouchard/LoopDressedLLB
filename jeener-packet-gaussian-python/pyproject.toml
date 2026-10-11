@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jeener-packet-gaussian"
-version = "2026.7.9"
-description = "Loop-dressed Jeener-cube packet solver with certified packet-mode Gaussian diagnostics."
+version = "2026.10.10"
+description = "Loop-dressed Jeener-cube packet solver with packet-mode Gaussian diagnostics."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
