@@ -57,6 +57,12 @@ typedef struct {
     double multi_mean;
     double multi_nu_min;
     double added_noise_max;
+    double uncertainty_margin_min;
+    double generator_cp_margin;
+    int valid_count;
+    int sample_count;
+    int response_invariant;
+    int null_control_violation;
 } jpg_row_result;
 
 typedef struct {

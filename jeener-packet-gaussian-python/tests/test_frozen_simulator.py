@@ -1,7 +1,7 @@
-import hashlib
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -17,17 +17,12 @@ from jeener_packet_gaussian import simulator
 
 
 SIMULATOR = SRC / "jeener_packet_gaussian" / "simulator.py"
-RELEASE_SHA256 = "4892b31a6bb43573c0c5051fbe5f587aa3caef14966adf51a26fc6be889c5722"
 
 
 class SourceIntegrityTests(unittest.TestCase):
     def test_package_identity(self):
         self.assertEqual(PROGRAM_NAME, "jeener_packet_gaussian")
-        self.assertEqual(PROGRAM_VERSION, "2026.7.9")
-
-    def test_release_source_hash(self):
-        digest = hashlib.sha256(SIMULATOR.read_bytes()).hexdigest()
-        self.assertEqual(digest, RELEASE_SHA256)
+        self.assertEqual(PROGRAM_VERSION, "2026.10.10")
 
     def test_exact_constrained_initialization_for_pra_benchmark(self):
         y = simulator.init_MN(Nvec=(0.30, 0.0, 0.0), tip=0.05, pattern="staggered")
@@ -68,6 +63,22 @@ class SourceIntegrityTests(unittest.TestCase):
 
         self.assertIn("Jeener 8-spin spectral clustering", result.stdout)
         self.assertIn("--ent-native-model", result.stdout)
+
+    def test_native_cli_uses_computed_covariance(self):
+        env = os.environ.copy()
+        env['PYTHONPATH'] = str(SRC)
+        env['MPLBACKEND'] = 'Agg'
+        with tempfile.TemporaryDirectory() as output:
+            base = [sys.executable,'-m','jeener_packet_gaussian','--mode','eigen',
+                    '--kmax','0.03','--Nvec','0','0','0','--ent','1','--ent-save','0',
+                    '--ent-native-model','frozen','--ent-NK','2','--ent-NT','3',
+                    '--ent-window','0:1','--T','8','--npts','31','--no-show','1',
+                    '--outdir',output]
+            for extra,expected in [([], 'E_N=0.7111'),
+                                   (['--ent-layer','multi'], 'FI_score=0.1908'),
+                                   (['--ent-native-model','none'], 'no entanglement result is reported')]:
+                result = subprocess.run(base+extra,env=env,text=True,capture_output=True,check=True,timeout=30)
+                self.assertIn(expected,result.stdout)
 
 
 if __name__ == "__main__":

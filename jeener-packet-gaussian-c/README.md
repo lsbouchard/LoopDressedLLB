@@ -1,9 +1,12 @@
 # Jeener Packet Gaussian C
 
 This repository contains a C implementation of the native packet-Gaussian
-benchmark path for the Jeener cube code. It is intended for reproducing the
-validated frozen native packet-Gaussian PRA benchmark cases from the Python
-release, without the plotting and exploratory workflow layers.
+benchmark path for the Jeener cube code. It computes the corrected frozen
+packet covariance, without the plotting and exploratory workflow layers.
+
+The covariance equations do not reproduce the paper's separable `N=0` null
+control. See [the audit](../AUDIT.md) before interpreting these results. The
+corrected software benchmarks are listed in the repository-root README.
 
 The portable backend uses POSIX threads to parallelize the k-grid. The macOS
 build includes a low-level Metal availability layer and shader source. The
@@ -15,6 +18,16 @@ macOS:
 
 ```bash
 make
+```
+
+On macOS, the SDK is selected with `xcrun` to keep it consistent with the
+active developer toolchain. `MACOS_SDK=/path/to/sdk` overrides that selection.
+
+Build without any Metal framework dependency:
+
+```bash
+make clean
+make METAL=0
 ```
 
 Linux:
@@ -62,16 +75,27 @@ bin/jeener_packet_c \
 make test
 ```
 
-The regression script runs the frozen Python benchmark path and compares the C
-output for the native, sigma-enhanced, stronger coherent, and thermal benchmark
-cases. By default it uses:
+The tests check analytic Gaussian states and every row of full-precision C
+and Python results, including null, thermal, dissipative, aggregation, sampling,
+and input-validation controls. The Python reference defaults to the sibling
+codebase:
 
 ```text
-/Users/bouchard/Python/Jeener/jeener_packet_gaussian.py
+../jeener-packet-gaussian-python/src/jeener_packet_gaussian/simulator.py
 ```
 
 Set `JPG_PYTHON_REFERENCE=/path/to/jeener_packet_gaussian.py` to compare against
-another frozen Python reference file.
+another compatible Python reference file. `make test-numerics` runs the C
+analytic tests without Python.
+
+## Output Validity
+
+JSON includes complete-positivity and uncertainty margins, added covariance
+noise, accepted/sample counts, and a flag for violation of the paper's null
+control. Invalid samples are excluded; metrics are `null` if no samples remain.
+Endpoint metrics refer to the last accepted sample. `--ent-aggregate max|mean`
+applies to both pairs and triplets; every triplet uses its weakest bipartition.
+Unknown options and unsupported scientific configurations are errors.
 
 ## License
 

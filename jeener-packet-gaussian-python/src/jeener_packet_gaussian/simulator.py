@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 # jeener_packet_gaussian.py
 # Loop-dressed Jeener-cube packet solver with exact constrained initialization
-# and certified packet-mode Gaussian diagnostics.
+# and packet-mode Gaussian diagnostics.
 
 """
 jeener_packet_gaussian.py -- Integrated mesoscopic spin-packet simulator for the
 Jeener cube, with loop-dressed packet dynamics, optional stochastic torque and
-short-memory damping, certified native packet-mode Gaussian diagnostics, and an
+short-memory damping, native packet-mode Gaussian diagnostics, and an
 engineered quadratic-Gaussian benchmark layer.
 
 Core design choices:
 - Native entanglement is evaluated only in the canonical packet tangent-mode
   Gaussian models implemented below (`frozen` or `linearized`).
-- On the exact native branch with N(0)=0, the implemented drift/noise/memory
-  terms preserve N(t)=0, so the certified native output is forced to the
-  separable baseline.
+- The response invariant N(t)=0 does not imply a separable packet covariance.
+  The covariance is propagated on this branch and the paper's null-control
+  discrepancy is reported explicitly.
 - User-specified initial conditions are prepared directly on the exact rotated
   coherent-state constraint surface instead of being silently rescaled by the
   geometric restoration step.
@@ -39,7 +39,7 @@ from math import sqrt
 HBAR = 1.0
 
 PROGRAM_NAME = "jeener_packet_gaussian"
-PROGRAM_VERSION = "2026.7.9"
+PROGRAM_VERSION = "2026.10.10"
 
 # Entanglement global set from CLI.
 ENT_CV_ROT = 0
@@ -345,6 +345,8 @@ def _constrained_initial_packets(M_dirs: np.ndarray,
     R = float(SAFETY_CFG['sphere_radius'])
     M_dirs = np.asarray(M_dirs, float).reshape(N_SPINS, 3)
     N_req = np.asarray(N_req, float).reshape(N_SPINS, 3)
+    if not np.isfinite(R) or R <= 0 or not np.all(np.isfinite(M_dirs)) or not np.all(np.isfinite(N_req)):
+        raise ValueError('packet radius and initial vectors must be finite, with positive radius')
     M0 = np.zeros_like(M_dirs)
     N0 = np.zeros_like(N_req)
 
@@ -352,8 +354,7 @@ def _constrained_initial_packets(M_dirs: np.ndarray,
         mhat = _safe_unit(M_dirs[j])
         Nj = N_req[j].copy()
         parallel = float(np.dot(Nj, mhat))
-        if abs(parallel) > tol:
-            Nj = Nj - parallel * mhat
+        Nj = Nj - parallel * mhat
         nmag = float(norm(Nj))
         if nmag > R + tol:
             raise ValueError(
@@ -499,23 +500,6 @@ def loop_dipolar_scale_global(loop_order: int, N_amp: float, k: float) -> float:
     return float(np.clip(1.0 + seff, 1e-3, 10.0))
 
 
-def loop_coherent_local_scales(M: np.ndarray, N: np.ndarray, k: float, loop_order: int) -> Tuple[np.ndarray, np.ndarray]:
-    """Per-packet coherent loop renormalizations for diagnostics."""
-    n = M.shape[0]
-    if loop_order <= 0 or k == 0.0:
-        return np.ones(n), np.ones(n)
-    N2 = np.einsum('ai,ai->a', N, N)
-    x = N2
-    gmm_a = 1.0 + _poly_sum(LOOP_COEFFS['sigma'], loop_order, x, 1)
-    gmm_a = np.clip(gmm_a, 1e-3, 10.0)
-    if loop_order >= 4:
-        keff = _poly_sum(LOOP_COEFFS['kappa'], loop_order, x, 2)
-        gmn_a = np.clip(1.0 + keff, 1e-3, 10.0)
-    else:
-        gmn_a = np.ones(n)
-    return gmm_a, gmn_a
-
-
 def loop_edge_coherent_scales(N: np.ndarray, loop_order: int) -> Tuple[np.ndarray, np.ndarray]:
     """Edgewise coherent renormalization of the dipolar bilinear kernels.
 
@@ -618,13 +602,7 @@ def rhs_MN_full_base(t, y, k, N_amp):
     return np.concatenate([dM.ravel(), dN.ravel()])
 
 def rhs_MN_full(t, y, k, N_amp, loop_order=0, disable_vertex: bool=False):
-    """Loop-aware RHS with coherent renormalization of the entangling dipolar bilinear.
-
-    In jeener_packet_gaussian.py the coherent loop channels act directly on the nonlocal
-    dipolar kernels that generate packet-mode entanglement. This is the minimal
-    physics correction needed if one wants loop dressing to enhance, rather than
-    only suppress, the entanglement.
-    """
+    """Packet drift with edgewise coherent dressing and local damping."""
     if loop_order <= 0 or k == 0.0:
         return rhs_MN_full_base(t, y, k, N_amp)
 
@@ -1294,8 +1272,6 @@ def _subset_bipartitions(subset: tuple, mode: str='all') -> list:
             right = tuple(x for x in subset if x not in left)
             if len(right) == 0:
                 continue
-            if len(left) > len(right):
-                continue
             out.append((tuple(left), right))
     return out
 
@@ -1359,14 +1335,12 @@ def _simulate_MN_record_bins(k: float,
         rng = default_rng(SDE_CFG['seed'])
     if t_idx is None:
         t_idx = np.arange(N_PTS, dtype=int)
-    t_idx = np.asarray(t_idx, int)
-    if t_idx.ndim != 1:
-        raise ValueError('t_idx must be a 1D integer array')
+    t_idx = _validate_covariance_sampling(T_TOT, N_PTS, t_idx)
 
     dt = T_TOT / (N_PTS - 1)
     n = N_SPINS
     nbins = len(t_idx)
-    t_lookup = {int(ti): ib for ib, ti in enumerate(t_idx.tolist())}
+    t_lookup = {int(ti): np.flatnonzero(t_idx == ti) for ti in np.unique(t_idx)}
     Mbins = np.zeros((nbins, n, 3), float)
     Nbins = np.zeros((nbins, n, 3), float)
 
@@ -1538,25 +1512,28 @@ def _symplectic_form(nmodes: int) -> np.ndarray:
 
 
 def _symplectic_eigenvalues(V: np.ndarray) -> np.ndarray:
-    """
-    Symplectic eigenvalues of a real covariance matrix.
-
-    Here we use the absolute eigenvalues of iΩV, which is substantially more stable in the
-    large-squeezing regime relevant to engineered Gaussian controls.
-    """
-    V = 0.5 * (V + V.T)
+    """Williamson spectrum from a Hermitian Cholesky reduction of positive V."""
+    V = _checked_covariance(V)
     nmodes = V.shape[0] // 2
     Om = _symplectic_form(nmodes)
-    ew = np.linalg.eigvals(1j * Om @ V)
-    ew = np.sort(np.abs(np.real_if_close(ew)))
-    if ew.size % 2 != 0:
-        raise ValueError('symplectic spectrum requires an even-dimensional covariance matrix')
-    return 0.5 * (ew[0::2] + ew[1::2])
+    L = np.linalg.cholesky(V)
+    H = 1j * (L.T @ Om @ L)
+    ew = np.linalg.eigvalsh(H)
+    return 0.5 * (ew[nmodes:] - ew[:nmodes][::-1])
+
+
+def _checked_covariance(V: np.ndarray) -> np.ndarray:
+    V = np.asarray(V, float)
+    if V.ndim != 2 or V.shape[0] != V.shape[1] or not V.shape[0] or V.shape[0] % 2:
+        raise ValueError('covariance must be a nonempty even-dimensional square matrix')
+    if not np.all(np.isfinite(V)):
+        raise ValueError('covariance must be finite')
+    return 0.5 * (V + V.T)
 
 
 def _covariance_physicality_margin(V: np.ndarray) -> float:
-    nu = _symplectic_eigenvalues(V)
-    return float(np.min(nu) - 0.5)
+    V = _checked_covariance(V)
+    return float(np.linalg.eigvalsh(V + 0.5j * _symplectic_form(V.shape[0] // 2))[0])
 
 
 def _regularize_covariance_if_needed(V: np.ndarray,
@@ -1568,9 +1545,9 @@ def _regularize_covariance_if_needed(V: np.ndarray,
     smallest isotropic noise term δ I that restores physicality. This is
     conservative: isotropic noise cannot create entanglement.
     """
-    V = 0.5 * (V + V.T)
+    V = _checked_covariance(V)
     margin = _covariance_physicality_margin(V)
-    if margin >= 0.0 or not regularize:
+    if margin >= -1e-10 or not regularize:
         return V, margin, 0.0
     delta = -margin + eps
     Vreg = V + delta * np.eye(V.shape[0])
@@ -1590,7 +1567,8 @@ def _gaussian_logneg_from_cov(V: np.ndarray, transpose_modes: list) -> Tuple[flo
     Vpt = _partial_transpose_cov(V, transpose_modes)
     nu = _symplectic_eigenvalues(Vpt)
     nu = np.clip(np.real_if_close(nu).real, 0.0, None)
-    logneg = np.sum(np.maximum(0.0, -np.log2(np.maximum(2.0 * nu, 1e-16))))
+    logneg = np.sum(np.where(nu < 0.5 - 1e-10,
+                            np.maximum(0.0, -np.log2(np.maximum(2.0 * nu, 1e-16))), 0.0))
     return float(np.min(nu)), float(logneg)
 
 
@@ -1651,7 +1629,7 @@ def _multimode_metrics_from_cov(V_sub: np.ndarray,
     ln_vals = np.asarray(ln_vals, float)
     nu_vals = np.asarray(nu_vals, float)
     nu_worst = float(np.max(nu_vals))
-    fi_score = float(max(0.0, 0.5 - nu_worst))
+    fi_score = float(0.5 - nu_worst) if nu_worst < 0.5 - 1e-10 else 0.0
     return {
         'LN_MIN': float(np.min(ln_vals)),
         'LN_MEAN': float(np.mean(ln_vals)),
@@ -1755,48 +1733,6 @@ def _plot_ent_heatmap(Z, k_values, times_frac, title, fname, save=True, vlabel='
 
 
 
-def _build_separable_ent_output(k_values, times_frac, status: dict,
-                                diag_maxN: Optional[np.ndarray]=None) -> dict:
-    NK = len(k_values)
-    NT = len(times_frac)
-    z = np.zeros((NK, NT), float)
-    half = 0.5 * np.ones((NK, NT), float)
-    two = 2.0 * np.ones((NK, NT), float)
-    code = float(status.get('reason_code', 0))
-    classical = 1.0 if bool(status.get('classical_invariant', False)) else 0.0
-    certified = 1.0 if bool(status.get('certified', False)) else 0.0
-    if diag_maxN is None:
-        maxN = z.copy()
-    else:
-        maxN = np.asarray(diag_maxN, float).copy()
-        if maxN.shape != (NK, NT):
-            raise ValueError('diag_maxN must have shape (len(k_values), len(times_frac))')
-    return {
-        'times_frac': np.asarray(times_frac, float),
-        'pair': {
-            'LN': z.copy(),
-            'NU_PT': half.copy(),
-            'DUAN': two.copy(),
-        },
-        'multi': {
-            'LN_MIN': z.copy(),
-            'LN_MEAN': z.copy(),
-            'NU_WORST': half.copy(),
-            'FI_SCORE': z.copy(),
-        },
-        'diag': {
-            'phys_margin': z.copy(),
-            'added_noise': z.copy(),
-            'hp_occ_frac': z.copy(),
-            'max_N_norm': maxN,
-            'basis_symplectic_error': z.copy(),
-            'basis_reconstruction_error': z.copy(),
-            'basis_certified': np.ones((NK, NT), float),
-            'certified_flag': certified * np.ones((NK, NT), float),
-            'classical_invariant': classical * np.ones((NK, NT), float),
-            'reason_code': code * np.ones((NK, NT), float),
-        }
-    }
 
 
 def _print_pairwise_ent_summary(tag: str, ent_out: dict, k_values: np.ndarray,
@@ -1830,11 +1766,11 @@ def _print_pairwise_ent_summary(tag: str, ent_out: dict, k_values: np.ndarray,
     NU_min = _row_min_with_mask(NU, valid_mask)
     DU_min = _row_min_with_mask(DU, valid_mask)
     n_valid = _row_valid_count(LN, valid_mask)
-    print(f'{tag} === Pairwise Gaussian summary (certified valid bins) ===')
+    print(f'{tag} === Pairwise Gaussian summary (accepted bins) ===')
     print(f'{tag} last valid sampled bin in the selected window (entanglement requires nu_PT < 0.5 or Duan < 2):')
     for ik, x in enumerate(k_values):
         print(f'  {xlabel}={x:.4f}  E_N={LN_end[ik]:.4f}  nu_PT={NU_end[ik]:.4f}  Duan={DU_end[ik]:.4f}  n_valid={n_valid[ik]}')
-    print(f'{tag} best over certified valid bins in the selected window:')
+    print(f'{tag} best over accepted bins in the selected window:')
     for ik, x in enumerate(k_values):
         print(f'  {xlabel}={x:.4f}  E_N,max={LN_max[ik]:.4f}  nu_PT,min={NU_min[ik]:.4f}  Duan,min={DU_min[ik]:.4f}  n_valid={n_valid[ik]}')
 
@@ -1870,11 +1806,11 @@ def _print_multi_ent_summary(tag: str, ent_out: dict, k_values: np.ndarray,
     FI_best = _row_max_with_mask(FI, valid_mask)
     NU_best = _row_min_with_mask(NU, valid_mask)
     n_valid = _row_valid_count(LN, valid_mask)
-    print(f'{tag} === Multipartite Gaussian summary (certified valid bins) ===')
+    print(f'{tag} === Multipartite Gaussian summary (accepted bins) ===')
     print(f'{tag} last valid sampled bin in the selected window: min E_N is the weakest bipartition log-negativity inside the selected subset; FI_score > 0 means every tested bipartition is PPT-nonpositive within the Gaussian model.')
     for ik, x in enumerate(k_values):
         print(f'  {xlabel}={x:.4f}  minE_N={LN_end[ik]:.4f}  FI_score={FI_end[ik]:.4f}  worst_nu_PT={NU_end[ik]:.4f}  n_valid={n_valid[ik]}')
-    print(f'{tag} best over certified valid bins in the selected window:')
+    print(f'{tag} best over accepted bins in the selected window:')
     for ik, x in enumerate(k_values):
         print(f'  {xlabel}={x:.4f}  minE_N,max={LN_best[ik]:.4f}  FI_score,max={FI_best[ik]:.4f}  worst_nu_PT,min={NU_best[ik]:.4f}  n_valid={n_valid[ik]}')
 
@@ -1930,9 +1866,9 @@ def _row_entangled_fraction(Z: np.ndarray, mask: np.ndarray, sense: str, thresho
             continue
         vals = Z[i, m]
         if sense == 'gt':
-            out[i] = float(np.mean(vals > thr))
+            out[i] = float(np.mean(vals > thr + 1e-10))
         elif sense == 'lt':
-            out[i] = float(np.mean(vals < thr))
+            out[i] = float(np.mean(vals < thr - 1e-10))
         else:
             raise ValueError("sense must be 'gt' or 'lt'")
     return out
@@ -2081,14 +2017,17 @@ def run_native_entanglement_analysis(args, Nvec):
         raise ValueError('--ent-S must be positive for the Gaussian HP mapping.')
 
     status = _native_entanglement_status(Nvec, args=args, tol=float(args.ent_native_tol))
+    if not status['computed']:
+        print('[ent] Native covariance calculation disabled; no entanglement result is reported.')
+        return
 
-    print(f'[ent] Native certification status: certified={int(status["certified"])}  classical_invariant={int(status["classical_invariant"])}  reason_code={status["reason_code"]}')
+    print(f'[ent] Native calculation: computed={int(status["computed"])}  classical_invariant={int(status["classical_invariant"])}  reason_code={status["reason_code"]}')
     print(f'[ent] {status["reason"]}')
 
     reset_renorm_diag()
 
-    if bool(status['certified']):
-        print('[ent] Certified native output is computed from the selected native linearized Gaussian M,N model on the selected time window.')
+    if bool(status['computed']):
+        print('[ent] Propagating packet-mode covariance on the selected time window.')
         print(f'[ent] Native Gaussian model settings: model={args.ent_native_model}  source={args.ent_native_source}  nth={float(args.ent_native_nth):.3f}  nbath={float(args.ent_native_nbath):.3f}')
         rng_lin = default_rng(SDE_CFG['seed'])
         ent_out = native_linearized_collect_metrics_over_kt(
@@ -2115,31 +2054,10 @@ def run_native_entanglement_analysis(args, Nvec):
             source_mode=str(args.ent_native_source),
             dynamic_background=(str(args.ent_native_model).strip().lower() == 'linearized'),
         )
-    else:
-        print(f'[ent] Certified native output therefore uses the separable baseline: E_N=0, nu_PT=0.5, Duan=2, FI_score=0.')
-        if bool(status['classical_invariant']):
-            diag_maxN = np.zeros((len(k_values), ent_NT), float)
-        else:
-            rng_diag = default_rng(SDE_CFG['seed'])
-            diag_nreal = int(SDE_CFG['nreal']) if (SDE_CFG['on'] == 1 and SDE_CFG['noise_scale'] > 0.0) else 1
-            diag_maxN = native_maxN_over_kt(
-                Nvec=Nvec,
-                k_values=k_values,
-                T_TOT=args.T,
-                N_PTS=args.npts,
-                tip=args.tip,
-                pattern=args.pattern,
-                loop_order=args.loops,
-                rng=rng_diag,
-                time_window_frac=time_window_frac,
-                ent_NT=ent_NT,
-                nreal_diag=diag_nreal,
-            )
-        ent_out = _build_separable_ent_output(k_values, times_frac, status, diag_maxN=diag_maxN)
 
-    native_valid_mask = np.isfinite(ent_out['pair']['LN'])
-    if bool(status['certified']):
-        native_valid_mask = _valid_time_mask_from_added_noise(
+    native_valid_mask = np.isfinite(ent_out['pair']['LN'] if do_pair else ent_out['multi']['FI_SCORE'])
+    if bool(status['computed']):
+        native_valid_mask &= _valid_time_mask_from_added_noise(
             ent_out['diag']['added_noise'],
             float(args.ent_native_reg_warn)
         )
@@ -2153,21 +2071,21 @@ def run_native_entanglement_analysis(args, Nvec):
         _plot_ent_heatmap(
             _mask_for_plot(ent_out['pair']['LN'], native_valid_mask),
             k_values, ent_out['times_frac'],
-            f'Certified native pairwise log-negativity',
+            f'Computed native pairwise log-negativity',
             'ent_pairwise_gaussian_logneg_heatmap.png',
             save=bool(args.ent_save), vlabel='E_N'
         )
         _plot_ent_heatmap(
             _mask_for_plot(ent_out['pair']['NU_PT'], native_valid_mask),
             k_values, ent_out['times_frac'],
-            f'Certified native pairwise PPT symplectic eigenvalue',
+            f'Computed native pairwise PPT symplectic eigenvalue',
             'ent_pairwise_gaussian_nupt_heatmap.png',
             save=bool(args.ent_save), vlabel='nu_PT,min'
         )
         _plot_ent_heatmap(
             _mask_for_plot(ent_out['pair']['DUAN'], native_valid_mask),
             k_values, ent_out['times_frac'],
-            f'Certified native pairwise Duan witness',
+            f'Computed native pairwise Duan witness',
             'ent_pairwise_gaussian_duan_heatmap.png',
             save=bool(args.ent_save), vlabel='Duan'
         )
@@ -2176,58 +2094,63 @@ def run_native_entanglement_analysis(args, Nvec):
         _plot_ent_heatmap(
             _mask_for_plot(ent_out['multi']['LN_MIN'], native_valid_mask),
             k_values, ent_out['times_frac'],
-            f'Certified native multipartite min log-negativity',
+            f'Computed native multipartite min log-negativity',
             'ent_multipartite_lnmin_heatmap.png',
             save=bool(args.ent_save), vlabel='min E_N'
         )
         _plot_ent_heatmap(
             _mask_for_plot(ent_out['multi']['FI_SCORE'], native_valid_mask),
             k_values, ent_out['times_frac'],
-            f'Certified native full-inseparability score',
+            f'Computed native full-inseparability score',
             'ent_multipartite_full_insep_heatmap.png',
             save=bool(args.ent_save), vlabel='max(0, 0.5 - worst nu_PT)'
         )
 
     if do_pair:
-        _print_pairwise_ent_summary('[ent][certified]', ent_out, k_values, valid_mask=native_valid_mask, xlabel='k')
+        _print_pairwise_ent_summary('[ent][native]', ent_out, k_values, valid_mask=native_valid_mask, xlabel='k')
         if bool(getattr(args, 'window_summary', 1)):
-            _print_pairwise_window_summary('[ent][certified]', ent_out, k_values, valid_mask=native_valid_mask, xlabel='k')
+            _print_pairwise_window_summary('[ent][native]', ent_out, k_values, valid_mask=native_valid_mask, xlabel='k')
     if do_multi:
-        _print_multi_ent_summary('[ent][certified]', ent_out, k_values, valid_mask=native_valid_mask, xlabel='k')
+        _print_multi_ent_summary('[ent][native]', ent_out, k_values, valid_mask=native_valid_mask, xlabel='k')
         if bool(getattr(args, 'window_summary', 1)):
-            _print_multi_window_summary('[ent][certified]', ent_out, k_values, valid_mask=native_valid_mask, xlabel='k', include_full=False)
+            _print_multi_window_summary('[ent][native]', ent_out, k_values, valid_mask=native_valid_mask, xlabel='k', include_full=False)
 
     print()
-    print('[ent][certified] === Diagnostics ===')
-    print(f"[ent][certified][diag] max isotropic covariance regularization added = {np.nanmax(ent_out['diag']['added_noise']):.3e}")
-    print(f"[ent][certified][diag] worst HP occupation fraction n/S_eff = {np.nanmax(ent_out['diag']['hp_occ_frac']):.3e}")
-    print(f"[ent][certified][diag] minimum covariance physicality margin after regularization = {np.nanmin(ent_out['diag']['phys_margin']):.3e}")
-    print(f"[ent][certified][diag] max native |N| encountered = {np.nanmax(ent_out['diag']['max_N_norm']):.3e}")
-    print(f"[ent][certified][diag] max packet-basis symplectic error = {np.nanmax(ent_out['diag']['basis_symplectic_error']):.3e}")
-    print(f"[ent][certified][diag] max packet-basis reconstruction error = {np.nanmax(ent_out['diag']['basis_reconstruction_error']):.3e}")
+    print('[ent][native] === Diagnostics ===')
+    print(f"[ent][native][diag] minimum generator CP margin = {np.nanmin(ent_out['diag']['generator_cp_margin']):.3e}")
+    print(f"[ent][native][diag] minimum step CP margin = {np.nanmin(ent_out['diag']['step_cp_margin']):.3e}")
+    if ((args.ent_native_model == 'frozen' and np.any(ent_out['diag']['generator_cp_margin'] < -1e-8))
+            or np.any(ent_out['diag']['step_cp_margin'] < -1e-8)):
+        print('[ent][native][warn] Complete-positivity checks failed; affected bins are excluded from entanglement summaries.')
+    print(f"[ent][native][diag] max isotropic covariance regularization added = {np.nanmax(ent_out['diag']['added_noise']):.3e}")
+    print(f"[ent][native][diag] worst HP occupation fraction n/S_eff = {np.nanmax(ent_out['diag']['hp_occ_frac']):.3e}")
+    print(f"[ent][native][diag] minimum covariance physicality margin after regularization = {np.nanmin(ent_out['diag']['phys_margin']):.3e}")
+    print(f"[ent][native][diag] max native |N| encountered = {np.nanmax(ent_out['diag']['max_N_norm']):.3e}")
+    print(f"[ent][native][diag] max packet-basis symplectic error = {np.nanmax(ent_out['diag']['basis_symplectic_error']):.3e}")
+    print(f"[ent][native][diag] max packet-basis reconstruction error = {np.nanmax(ent_out['diag']['basis_reconstruction_error']):.3e}")
     if 'packet_damping_max' in ent_out['diag']:
-        print(f"[ent][certified][diag] max packet damping rate used in Gaussian step = {np.nanmax(ent_out['diag']['packet_damping_max']):.3e}")
-        print(f"[ent][certified][diag] max packet loop field shift used in Gaussian step = {np.nanmax(ent_out['diag']['packet_Bshift_max']):.3e}")
+        print(f"[ent][native][diag] max packet damping rate used in Gaussian step = {np.nanmax(ent_out['diag']['packet_damping_max']):.3e}")
+        print(f"[ent][native][diag] max packet loop field shift used in Gaussian step = {np.nanmax(ent_out['diag']['packet_Bshift_max']):.3e}")
         if 'packet_dipolar_MM_max' in ent_out['diag']:
-            print(f"[ent][certified][diag] max packet coherent dipolar-kernel renormalization = {np.nanmax(ent_out['diag']['packet_dipolar_MM_max']):.3e}")
-            print(f"[ent][certified][diag] max packet coherent dipolar-kernel deviation from unity = {np.nanmax(ent_out['diag']['packet_dipolar_MM_dev_max']):.3e}")
+            print(f"[ent][native][diag] max packet coherent dipolar-kernel renormalization = {np.nanmax(ent_out['diag']['packet_dipolar_MM_max']):.3e}")
+            print(f"[ent][native][diag] max packet coherent dipolar-kernel deviation from unity = {np.nanmax(ent_out['diag']['packet_dipolar_MM_dev_max']):.3e}")
         if 'packet_backaction_max' in ent_out['diag']:
-            print(f"[ent][certified][diag] max packet coherent back-action renormalization = {np.nanmax(ent_out['diag']['packet_backaction_max']):.3e}")
-            print(f"[ent][certified][diag] max packet coherent back-action deviation from unity = {np.nanmax(ent_out['diag']['packet_backaction_dev_max']):.3e}")
-        print(f"[ent][certified][diag] max packet vertex renormalization = {np.nanmax(ent_out['diag']['packet_vertex_max']):.3e}")
-        print(f"[ent][certified][diag] max packet vertex deviation from unity = {np.nanmax(ent_out['diag']['packet_vertex_dev_max']):.3e}")
-        print(f"[ent][certified][diag] max packet diffusion trace = {np.nanmax(ent_out['diag']['packet_diffusion_trace']):.3e}")
-        print(f"[ent][certified][diag] max packet step-noise trace = {np.nanmax(ent_out['diag']['packet_step_noise_trace']):.3e}")
-        print(f"[ent][certified][diag] max packet drift-generator norm = {np.nanmax(ent_out['diag']['packet_drift_generator_norm']):.3e}")
-        print(f"[ent][certified][diag] max packet drift map/generator mismatch = {np.nanmax(ent_out['diag']['packet_drift_map_mismatch']):.3e}")
-    _print_renorm_diag('[ent][certified]')
-    if bool(status['certified']):
-        print(f"[ent][certified][diag] bins with covariance regularization > {float(args.ent_native_reg_warn):.1e} = {int(np.sum(np.asarray(ent_out['diag']['added_noise']) > float(args.ent_native_reg_warn)))}")
-        print(f"[ent][certified][diag] bins failing packet-basis certification = {int(np.sum(np.asarray(ent_out['diag']['basis_certified']) < 0.5))}")
+            print(f"[ent][native][diag] max packet coherent back-action renormalization = {np.nanmax(ent_out['diag']['packet_backaction_max']):.3e}")
+            print(f"[ent][native][diag] max packet coherent back-action deviation from unity = {np.nanmax(ent_out['diag']['packet_backaction_dev_max']):.3e}")
+        print(f"[ent][native][diag] max packet vertex renormalization = {np.nanmax(ent_out['diag']['packet_vertex_max']):.3e}")
+        print(f"[ent][native][diag] max packet vertex deviation from unity = {np.nanmax(ent_out['diag']['packet_vertex_dev_max']):.3e}")
+        print(f"[ent][native][diag] max packet diffusion trace = {np.nanmax(ent_out['diag']['packet_diffusion_trace']):.3e}")
+        print(f"[ent][native][diag] max packet step-noise trace = {np.nanmax(ent_out['diag']['packet_step_noise_trace']):.3e}")
+        print(f"[ent][native][diag] max packet drift-generator norm = {np.nanmax(ent_out['diag']['packet_drift_generator_norm']):.3e}")
+        print(f"[ent][native][diag] max packet drift map/generator mismatch = {np.nanmax(ent_out['diag']['packet_drift_map_mismatch']):.3e}")
+    _print_renorm_diag('[ent][native]')
+    if bool(status['computed']):
+        print(f"[ent][native][diag] bins with covariance regularization > {float(args.ent_native_reg_warn):.1e} = {int(np.sum(np.asarray(ent_out['diag']['added_noise']) > float(args.ent_native_reg_warn)))}")
+        print(f"[ent][native][diag] bins failing packet-basis certification = {int(np.sum(np.asarray(ent_out['diag']['basis_certified']) < 0.5))}")
         if np.any(np.asarray(ent_out['diag']['added_noise']) > float(args.ent_native_reg_warn)):
-            print('[ent][certified][warn] Some native-linearized bins required non-negligible covariance repair. Prefer regions where the added isotropic noise is negligible.')
+            print('[ent][native][warn] Some native-linearized bins required non-negligible covariance repair. Prefer regions where the added isotropic noise is negligible.')
         if np.any(np.asarray(ent_out['diag']['basis_certified']) < 0.5):
-            print('[ent][certified][warn] Some sampled bins failed the packet-basis symplectic certification check. Treat entanglement in those bins as uncertified.')
+            print('[ent][native][warn] Some sampled bins failed the packet-basis symplectic certification check. Treat entanglement in those bins as uncertified.')
 
     return ent_out
 
@@ -2611,13 +2534,13 @@ def simulate_engineered_covariance_bins(g: float,
                                         t_idx: np.ndarray=None) -> np.ndarray:
     if t_idx is None:
         t_idx = np.arange(N_PTS, dtype=int)
-    t_idx = np.asarray(t_idx, int)
+    t_idx = _validate_covariance_sampling(T_TOT, N_PTS, t_idx)
     dt = T_TOT / max(N_PTS - 1, 1)
     dim = 2 * N_SPINS
     Om = _symplectic_form(N_SPINS)
     G_static, G_control = _engineered_G_matrices(cfg)
     V = _engineered_initial_cov(cfg)
-    lookup = {int(ti): ib for ib, ti in enumerate(t_idx.tolist())}
+    lookup = {int(ti): np.flatnonzero(t_idx == ti) for ti in np.unique(t_idx)}
     Vbins = np.zeros((len(t_idx), dim, dim), float)
     if 0 in lookup:
         Vbins[lookup[0]] = V
@@ -3027,7 +2950,7 @@ def main():
     parser = argparse.ArgumentParser(
         description=(
             'Jeener 8-spin spectral clustering with optional coherence N, loop corrections, '
-            'SDE noise, memory, certified native packet-Gaussian entanglement, and engineered '
+            'SDE noise, memory, native packet-Gaussian entanglement, and engineered '
             'quadratic Gaussian Hamiltonians.'
         )
     )
@@ -3127,13 +3050,13 @@ def main():
     parser.add_argument('--ent-native-tol', type=float, default=1e-15,
                         help='Tolerance used to detect the exact native invariant manifold N(t)=0.')
     parser.add_argument('--ent-native-model', choices=['linearized','frozen','none'], default='linearized',
-                        help='Certified native entanglement model. linearized propagates the native 4N Gaussian covariance with a time-dependent tangent-map model obtained by finite-differencing the actual one-step nonlinear native map around the deterministic background trajectory; frozen uses the initial build_A_MN generator only; none keeps the certified native output at the separable baseline away from the invariant manifold.')
+                        help='Native 2N-dimensional packet covariance model: linearized uses the time-dependent projected tangent map; frozen uses the initial projected drift; none disables native covariance output.')
     parser.add_argument('--ent-native-source', choices=['full','diag','cross','mm-only'], default='full',
-                        help='Source-diagnostic block selection for the native Gaussian generator: full uses all blocks; diag removes M<->N cross blocks; cross keeps on-site self blocks plus M<->N cross blocks but removes same-sector packet-to-packet couplings; mm-only keeps only the physical M-sector drift.')
+                        help='Compatibility option; the canonical packet model supports only full. Other values produce a warning and use full.')
     parser.add_argument('--ent-native-nth', type=float, default=0.0,
-                        help='Initial thermal occupancy per native Gaussian mode used by the certified native linearized model.')
+                        help='Initial thermal occupancy per native Gaussian mode used by the native linearized model.')
     parser.add_argument('--ent-native-nbath', type=float, default=0.0,
-                        help='Bath thermal occupancy used for the explicit native local damping terms in the certified native linearized model.')
+                        help='Bath thermal occupancy used for the explicit native local damping terms in the native linearized model.')
     parser.add_argument('--ent-native-reg-warn', type=float, default=1e-6,
                         help='Threshold above which native-linearized covariance repair is flagged as non-negligible in whole-window summaries.')
 
@@ -3450,6 +3373,8 @@ def _native_initial_covariance_mn(nth_M: float=0.0, nth_N: float=0.0) -> np.ndar
     Ordering is X = (Q_1, P_1, ..., Q_8, P_8). The nth_N argument is retained only
     for CLI backward compatibility and is ignored in this canonical packet-mode model.
     """
+    if not np.isfinite(nth_M) or nth_M < 0.0:
+        raise ValueError('initial thermal occupancy must be finite and nonnegative')
     dim = 2 * N_SPINS
     V = np.zeros((dim, dim), float)
     qv = float(max(nth_M, 0.0) + 0.5)
@@ -3480,15 +3405,21 @@ def _state_tangent_basis_packet(y_state: np.ndarray) -> Tuple[np.ndarray, np.nda
     """
     y = np.asarray(y_state, float)
     M = y[:3 * N_SPINS].reshape(N_SPINS, 3)
+    response = y[3 * N_SPINS:].reshape(N_SPINS, 3)
     inject = np.zeros((6 * N_SPINS, 2 * N_SPINS), float)
     proj = np.zeros((2 * N_SPINS, 3 * N_SPINS), float)
     for j in range(N_SPINS):
+        if not np.all(np.isfinite(M[j])) or norm(M[j]) <= 1e-12:
+            raise ValueError('canonical packet modes require nonzero finite magnetization')
         e1, e2 = _orthonormal_tangent_basis(M[j])
         scale = float(np.sqrt(max(HBAR * norm(M[j]), 1e-15)))
         rm = slice(3*j, 3*j+3)
         cm = 2*j
         inject[rm, cm] = scale * e1
         inject[rm, cm+1] = scale * e2
+        # Rotate N with M: dN = -M (N . dM) / |M|^2 preserves both constraints.
+        rn = slice(3*N_SPINS + 3*j, 3*N_SPINS + 3*j + 3)
+        inject[rn, cm:cm+2] = -np.outer(M[j], response[j] @ inject[rm, cm:cm+2]) / np.dot(M[j], M[j])
         proj[cm, rm] = e1 / scale
         proj[cm+1, rm] = e2 / scale
     return inject, proj
@@ -3545,11 +3476,8 @@ def _native_packet_diffusion_matrix(y_state: np.ndarray,
                                     proj: Optional[np.ndarray]=None) -> np.ndarray:
     """Markovian packet-mode diffusion matrix in the canonical tangent basis.
 
-    The prev implementation used an isotropic per-packet surrogate
-    ``lambda_j (2 n_bath + 1) I_2``. Here we keep the same locality assumption,
-    but project the lab-frame damping tensor into the canonical packet basis so
-    that the packet diffusion follows the actual tangent geometry and respects
-    the optional x/y damping anisotropy ``beta_anis``.
+    The lab-frame damping tensor is projected into the packet tangent basis,
+    including the x/y damping anisotropy ``beta_anis``.
     """
     y = np.asarray(y_state, float)
     M = y[:3 * N_SPINS].reshape(N_SPINS, 3)
@@ -3606,25 +3534,31 @@ def _native_packet_exact_step(y_state: np.ndarray,
                               N_amp_base: float,
                               loop_order: int,
                               nbath: float,
-                              fd_eps: float=1e-6) -> Tuple[np.ndarray, Optional[np.ndarray], dict]:
+                              fd_eps: float=1e-6,
+                              generator=None) -> Tuple[np.ndarray, Optional[np.ndarray], dict]:
     """Exact discrete packet Gaussian step from a local packet drift/diffusion model."""
-    inject, proj = _state_tangent_basis_packet(y_state)
-    A = _native_packet_drift_matrix(y_state, k, N_amp_base, loop_order, fd_eps=fd_eps,
-                                    inject=inject, proj=proj)
-    D = _native_packet_diffusion_matrix(y_state, k, loop_order, nbath,
-                                        inject=inject, proj=proj)
+    if generator is None:
+        inject, proj = _state_tangent_basis_packet(y_state)
+        A = _native_packet_drift_matrix(y_state, k, N_amp_base, loop_order, fd_eps=fd_eps,
+                                       inject=inject, proj=proj)
+        D = _native_packet_diffusion_matrix(y_state, k, loop_order, nbath,
+                                           inject=inject, proj=proj)
+    else:
+        A, D = generator
     Phi, Qd = _engineered_exact_step_operator(A, D, dt)
     y = np.asarray(y_state, float)
     M = y[:3 * N_SPINS].reshape(N_SPINS, 3)
     Nf = y[3 * N_SPINS:].reshape(N_SPINS, 3)
     Bshift_a, lam_a, back_a = loop_locals_per_packet(M, Nf, float(k), int(loop_order))
-    gmm_a, gmn_a = loop_coherent_local_scales(M, Nf, float(k), int(loop_order))
+    gmm_a, gmn_a = loop_edge_coherent_scales(Nf, int(loop_order) if k != 0 else 0)
     Bshift_a = np.asarray(Bshift_a, float)
     lam_a = np.maximum(np.asarray(lam_a, float), 0.0)
-    back_a = np.asarray(back_a, float)
+    back_a = np.ones(N_SPINS)
     gmm_a = np.asarray(gmm_a, float)
     gmn_a = np.asarray(gmn_a, float)
     Dsym = 0.5 * (D + D.T)
+    Om = _symplectic_form(N_SPINS)
+    step_noise = np.zeros_like(D) if Qd is None else Qd
     if Qd is None:
         q_trace = 0.0
         q_maxeig = 0.0
@@ -3635,6 +3569,9 @@ def _native_packet_exact_step(y_state: np.ndarray,
         q_maxeig = float(np.max(q_eigs)) if q_eigs.size else 0.0
     d_eigs = np.linalg.eigvalsh(Dsym)
     diag = {
+        'generator_cp_margin': float(np.linalg.eigvalsh(
+            Dsym - 0.5j * (A @ Om + Om @ A.T))[0]),
+        'step_cp_margin': float(np.linalg.eigvalsh(step_noise + 0.5j*(Om - Phi @ Om @ Phi.T))[0]),
         'packet_drift_generator_norm': float(np.linalg.norm(A, ord=np.inf)),
         'packet_diffusion_trace': float(np.trace(Dsym)),
         'packet_diffusion_maxeig': float(np.max(d_eigs)) if d_eigs.size else 0.0,
@@ -3650,6 +3587,17 @@ def _native_packet_exact_step(y_state: np.ndarray,
         'packet_vertex_dev_max': float(np.max(np.abs(back_a - 1.0))) if back_a.size else 0.0,
     }
     return Phi, Qd, diag
+
+
+def _validate_covariance_sampling(total_time, npts, t_idx):
+    indices = np.asarray(t_idx)
+    if not np.isfinite(total_time) or total_time < 0 or int(npts) != npts or npts < 2:
+        raise ValueError('time must be finite and nonnegative; npts must be an integer >= 2')
+    if (indices.ndim != 1 or not len(indices) or not np.all(np.isfinite(indices))
+            or np.any(indices != np.floor(indices)) or np.any(indices < 0)
+            or np.any(indices >= npts) or np.any(np.diff(indices) < 0)):
+        raise ValueError('sample indices must be sorted integers in [0, npts)')
+    return indices.astype(int)
 
 
 def simulate_native_trajectory_covariance_bins(k: float,
@@ -3675,13 +3623,11 @@ def simulate_native_trajectory_covariance_bins(k: float,
     """
     if str(source_mode).strip().lower() != 'full':
         print('[ent][warn] --ent-native-source is ignored in the canonical packet-mode native model; using the full physical packet tangent map.')
-    t_idx = np.asarray(t_idx, int)
-    if t_idx.ndim != 1:
-        raise ValueError('t_idx must be a 1D integer array')
-    dt = float(T_TOT) / float(max(N_PTS - 1, 1))
+    t_idx = _validate_covariance_sampling(T_TOT, N_PTS, t_idx)
+    dt = float(T_TOT) / float(N_PTS - 1)
     dim = 2 * N_SPINS
     out = np.zeros((len(t_idx), dim, dim), float)
-    lookup = {int(ti): ib for ib, ti in enumerate(t_idx.tolist())}
+    lookup = {int(ti): np.flatnonzero(t_idx == ti) for ti in np.unique(t_idx)}
     V = _native_initial_covariance_mn(nth_M=nth_M, nth_N=nth_N)
     basis_symp = np.full(len(t_idx), np.nan)
     basis_recon = np.full(len(t_idx), np.nan)
@@ -3700,6 +3646,8 @@ def simulate_native_trajectory_covariance_bins(k: float,
     diag_pkt_vertex_max = np.full(len(t_idx), np.nan)
     diag_pkt_vertex_dev = np.full(len(t_idx), np.nan)
     diag_phi_mismatch = np.full(len(t_idx), np.nan)
+    diag_cp = np.full(len(t_idx), np.nan)
+    diag_step_cp = np.full(len(t_idx), np.nan)
 
     _t_bg, Ybg = _simulate_native_background_states(k=k, Nvec=Nvec, loop_order=loop_order,
                                                     T_TOT=T_TOT, N_PTS=N_PTS, tip=tip, pattern=pattern)
@@ -3728,6 +3676,8 @@ def simulate_native_trajectory_covariance_bins(k: float,
         diag_pkt_vertex_max[lookup[0]] = s0['packet_vertex_max']
         diag_pkt_vertex_dev[lookup[0]] = s0['packet_vertex_dev_max']
         diag_phi_mismatch[lookup[0]] = 0.0
+        diag_cp[lookup[0]] = s0['generator_cp_margin']
+        diag_step_cp[lookup[0]] = 0.0
 
     for ti in range(1, int(N_PTS)):
         y0 = Ybg[ti - 1]
@@ -3746,6 +3696,9 @@ def simulate_native_trajectory_covariance_bins(k: float,
         ymid = 0.5 * (y0 + y1)
         Phi_loc, Qd, step_diag = _native_packet_exact_step(ymid, dt, k, N_amp_base, loop_order, nbath, fd_eps=eps)
         phi_mismatch = float(np.linalg.norm(Phi_map - Phi_loc, ord=np.inf))
+        Om = _symplectic_form(N_SPINS)
+        step_noise = np.zeros_like(V) if Qd is None else Qd
+        step_cp = float(np.linalg.eigvalsh(step_noise + 0.5j*(Om - Phi_map @ Om @ Phi_map.T))[0])
         V = _engineered_apply_exact_step(V, Phi_map, Qd)
         V = 0.5 * (V + V.T)
         if ti in lookup:
@@ -3768,8 +3721,12 @@ def simulate_native_trajectory_covariance_bins(k: float,
             diag_pkt_vertex_max[lookup[ti]] = step_diag['packet_vertex_max']
             diag_pkt_vertex_dev[lookup[ti]] = step_diag['packet_vertex_dev_max']
             diag_phi_mismatch[lookup[ti]] = phi_mismatch
+            diag_cp[lookup[ti]] = step_diag['generator_cp_margin']
+            diag_step_cp[lookup[ti]] = step_cp
     if return_diag:
         return out, {
+            'generator_cp_margin': diag_cp,
+            'step_cp_margin': diag_step_cp,
             'basis_symplectic_error': basis_symp,
             'basis_reconstruction_error': basis_recon,
             'basis_certified': basis_cert,
@@ -3812,14 +3769,11 @@ def simulate_native_linearized_covariance_bins(k: float,
     """
     if str(source_mode).strip().lower() != 'full':
         print('[ent][warn] --ent-native-source is ignored in the canonical packet-mode frozen model; using the full projected packet tangent dynamics.')
-    t_idx = np.asarray(t_idx, int)
-    if t_idx.ndim != 1:
-        raise ValueError('t_idx must be a 1D integer array')
-    dt = float(T_TOT) / float(max(N_PTS - 1, 1))
+    t_idx = _validate_covariance_sampling(T_TOT, N_PTS, t_idx)
+    dt = float(T_TOT) / float(N_PTS - 1)
     V = _native_initial_covariance_mn(nth_M=nth_M, nth_N=nth_N)
     dim = 2 * N_SPINS
     out = np.zeros((len(t_idx), dim, dim), float)
-    lookup = {int(ti): ib for ib, ti in enumerate(t_idx.tolist())}
 
     y_ref = init_MN(Nvec=Nvec, tip=tip, pattern=pattern)
     Jref, Pref = _state_tangent_basis_packet(y_ref)
@@ -3829,7 +3783,9 @@ def simulate_native_linearized_covariance_bins(k: float,
     basis_cert = np.full(len(t_idx), 1.0 if dref['certified'] else 0.0, float)
 
     N_amp_base = float(norm(np.asarray(Nvec, float).reshape(3)))
-    Phi, Qd, step_diag = _native_packet_exact_step(y_ref, dt, k, N_amp_base, loop_order, nbath)
+    A = _native_packet_drift_matrix(y_ref, k, N_amp_base, loop_order, inject=Jref, proj=Pref)
+    D = _native_packet_diffusion_matrix(y_ref, k, loop_order, nbath, inject=Jref, proj=Pref)
+    Phi, Qd, step_diag = _native_packet_exact_step(y_ref, dt, k, N_amp_base, loop_order, nbath, generator=(A,D))
     diag_drift_norm = np.full(len(t_idx), step_diag['packet_drift_generator_norm'], float)
     diag_D_trace = np.full(len(t_idx), step_diag['packet_diffusion_trace'], float)
     diag_D_maxeig = np.full(len(t_idx), step_diag['packet_diffusion_maxeig'], float)
@@ -3845,15 +3801,22 @@ def simulate_native_linearized_covariance_bins(k: float,
     diag_pkt_vertex_dev = np.full(len(t_idx), step_diag['packet_vertex_dev_max'], float)
     diag_phi_mismatch = np.zeros(len(t_idx), float)
 
-    if 0 in lookup:
-        out[lookup[0]] = V
-    for ti in range(1, int(N_PTS)):
-        V = _engineered_apply_exact_step(V, Phi, Qd)
-        V = 0.5 * (V + V.T)
-        if ti in lookup:
-            out[lookup[ti]] = V
+    previous = 0
+    steps = {1: (Phi, Qd)}
+    for ib, ti in enumerate(t_idx):
+        gap = int(ti) - previous
+        if gap:
+            if gap not in steps:
+                Pg, Qg, _ = _native_packet_exact_step(
+                    y_ref, gap * dt, k, N_amp_base, loop_order, nbath, generator=(A,D))
+                steps[gap] = Pg, Qg
+            V = _engineered_apply_exact_step(V, *steps[gap])
+        out[ib] = V
+        previous = int(ti)
     if return_diag:
         return out, {
+            'generator_cp_margin': np.full(len(t_idx), step_diag['generator_cp_margin']),
+            'step_cp_margin': np.full(len(t_idx), step_diag['step_cp_margin']),
             'basis_symplectic_error': basis_symp,
             'basis_reconstruction_error': basis_recon,
             'basis_certified': basis_cert,
@@ -3897,7 +3860,7 @@ def native_linearized_collect_metrics_over_kt(Nvec,
                                               native_nbath: float=0.0,
                                               source_mode: str='full',
                                               dynamic_background: bool=True) -> dict:
-    """Certified native Gaussian metrics in the canonical packet tangent-mode basis."""
+    """Computed native Gaussian metrics in the canonical packet tangent-mode basis."""
     t0_frac, t1_frac = time_window_frac
     t_idx = np.linspace(int(t0_frac * (N_PTS - 1)), int(t1_frac * (N_PTS - 1)), ent_NT).astype(int)
     times_frac = t_idx / (N_PTS - 1)
@@ -3930,6 +3893,8 @@ def native_linearized_collect_metrics_over_kt(Nvec,
     diag_pkt_vertex_max = np.full((NK, ent_NT), np.nan)
     diag_pkt_vertex_dev = np.full((NK, ent_NT), np.nan)
     diag_pkt_phi_mismatch = np.full((NK, ent_NT), np.nan)
+    diag_cp = np.full((NK, ent_NT), np.nan)
+    diag_step_cp = np.full((NK, ent_NT), np.nan)
     diag_maxN = native_maxN_over_kt(
         Nvec=Nvec,
         k_values=k_values,
@@ -3942,7 +3907,8 @@ def native_linearized_collect_metrics_over_kt(Nvec,
         time_window_frac=time_window_frac,
         ent_NT=ent_NT,
         nreal_diag=1,
-    )
+    ) if dynamic_background else np.full((NK, ent_NT), np.max(np.linalg.norm(
+        init_MN(Nvec=Nvec, tip=tip, pattern=pattern)[3*N_SPINS:].reshape(N_SPINS, 3), axis=1)))
 
     multi_subsets = [] if multi_subsets is None else list(multi_subsets)
 
@@ -3983,6 +3949,8 @@ def native_linearized_collect_metrics_over_kt(Nvec,
         diag_basis_symp[ik] = np.asarray(sim_diag['basis_symplectic_error'], float)
         diag_basis_recon[ik] = np.asarray(sim_diag['basis_reconstruction_error'], float)
         diag_basis_cert[ik] = np.asarray(sim_diag['basis_certified'], float)
+        diag_cp[ik] = sim_diag['generator_cp_margin']
+        diag_step_cp[ik] = sim_diag['step_cp_margin']
         diag_pkt_drift_norm[ik] = np.asarray(sim_diag.get('packet_drift_generator_norm', np.full(ent_NT, np.nan)), float)
         diag_pkt_D_trace[ik] = np.asarray(sim_diag.get('packet_diffusion_trace', np.full(ent_NT, np.nan)), float)
         diag_pkt_D_maxeig[ik] = np.asarray(sim_diag.get('packet_diffusion_maxeig', np.full(ent_NT, np.nan)), float)
@@ -4003,6 +3971,10 @@ def native_linearized_collect_metrics_over_kt(Nvec,
             diag_phys[ik, jt] = phys_margin
             diag_added[ik, jt] = added_noise
             diag_hp[ik, jt] = _max_hp_occupation_fraction(Vphys, ent_S)
+            if (not diag_basis_cert[ik, jt] or phys_margin < -1e-10
+                    or (not dynamic_background and diag_cp[ik, jt] < -1e-8)
+                    or diag_step_cp[ik, jt] < -1e-8):
+                continue
             if pair_enabled and len(pairs) > 0:
                 ln_vals = []
                 nu_vals = []
@@ -4040,6 +4012,8 @@ def native_linearized_collect_metrics_over_kt(Nvec,
         'pair': {'LN': pair_ln, 'NU_PT': pair_nu, 'DUAN': pair_du},
         'multi': {'LN_MIN': multi_ln_min, 'LN_MEAN': multi_ln_mean, 'NU_WORST': multi_nu_worst, 'FI_SCORE': multi_fi},
         'diag': {
+            'generator_cp_margin': diag_cp,
+            'step_cp_margin': diag_step_cp,
             'phys_margin': diag_phys,
             'added_noise': diag_added,
             'hp_occ_frac': diag_hp,
@@ -4071,34 +4045,28 @@ def _native_invariant_manifold_active(Nvec, tol: float=1e-15) -> bool:
 
 
 def _native_entanglement_status(Nvec, args=None, tol: float=1e-15) -> dict:
-    classical = _native_invariant_manifold_active(Nvec, tol=tol)
-    native_model = 'linearized' if args is None else str(getattr(args, 'ent_native_model', 'linearized')).strip().lower()
-    if classical:
-        reason = ('Certified native entanglement is forced to the separable baseline: '
-                  'N(0)=0 activates the exact invariant manifold N(t)=0 of the implemented '
-                  'native drift/noise/memory terms, so the native dynamics remain on the '
-                  'classical Jeener/LLB branch.')
-        code = 1
-        certified = False
-    elif native_model in ('linearized','frozen'):
-        if native_model == 'linearized':
-            reason = ('Certified native entanglement is computed within a time-dependent canonical packet-mode Gaussian native model in jeener_packet_gaussian.py. '
-                      'The packet background is integrated from the native nonlinear dynamics, the physical tangent-plane packet modes '
-                      '(Q_j,P_j) are constructed from the M-field tangent fluctuations, and their covariance is propagated directly in this '
-                      'canonical basis by finite-differencing the actual native one-step map. A Berry-symplectic packet-basis certification '
-                      'diagnostic is reported for every sampled bin.')
-        else:
-            reason = ('Certified native entanglement is computed within a frozen-background canonical packet-mode Gaussian native model in jeener_packet_gaussian.py. '
-                      'The covariance is propagated directly in the packet tangent-mode basis (Q_j,P_j), with the frozen projected native packet generator '
-                      'used only as a comparison to the time-dependent packet-mode model. A packet-basis symplectic certification diagnostic is reported.')
-        code = 2
-        certified = True
-    else:
-        reason = ('Certified native entanglement is withheld: no validated native Gaussian quantum model '
-                  'was requested.')
+    tip = 0.05 if args is None else float(getattr(args, 'tip', 0.05))
+    pattern = 'staggered' if args is None else str(getattr(args, 'pattern', 'staggered'))
+    y = init_MN(Nvec=Nvec, tip=tip, pattern=pattern)
+    classical = bool(np.max(np.abs(y[3*N_SPINS:])) <= tol)
+    model = 'linearized' if args is None else str(getattr(args, 'ent_native_model', 'linearized')).lower()
+    computed = model in ('linearized', 'frozen')
+    if not computed:
+        reason = 'Native covariance calculation disabled; no entanglement result is reported.'
         code = 3
-        certified = False
-    return {'certified': bool(certified), 'classical_invariant': classical, 'reason': reason, 'reason_code': int(code), 'native_model': native_model}
+    elif classical:
+        reason = ("WARNING: N(t)=0 is a response-sector invariant, not a covariance null control. "
+                  "The implemented generator retains dipolar coupling at N=0. The paper's "
+                  "separable null-control claim is not reproduced. Covariance results are "
+                  "computed without an imposed separable baseline.")
+        code = 1
+    else:
+        reason = ('Native packet covariance is computed from the selected projected generator. '
+                  'Basis, uncertainty and complete-positivity checks are numerical diagnostics; '
+                  'they do not establish agreement with the unresolved paper null control.')
+        code = 2
+    return {'computed': computed, 'certified': False, 'classical_invariant': classical,
+            'reason': reason, 'reason_code': code, 'native_model': model}
 
 if __name__ == '__main__':
     main()

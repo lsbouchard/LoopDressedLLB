@@ -1,4 +1,4 @@
-"""Jeener-cube packet simulator with certified packet-mode Gaussian diagnostics."""
+"""Jeener-cube packet simulator with packet-mode Gaussian diagnostics."""
 
 from .simulator import PROGRAM_NAME, PROGRAM_VERSION
 

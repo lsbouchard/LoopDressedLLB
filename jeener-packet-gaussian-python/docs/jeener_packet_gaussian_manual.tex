@@ -10,6 +10,7 @@
 \usepackage{xcolor}
 \usepackage{listings}
 \usepackage{enumitem}
+\setlength{\emergencystretch}{2em}
 
 \hypersetup{
   colorlinks=true,
@@ -42,17 +43,24 @@
 
 \title{\texttt{jeener\_packet\_gaussian.py}: Complete User Manual}
 \author{Louis-S. Bouchard \and Arianna Wu}
-\date{\today}
+\date{October 10, 2026}
 
 \begin{document}
 \maketitle
+\noindent\textbf{Numerical status.} The covariance equations do not reproduce
+the paper's separable zero-response null control. The code now reports the
+computed covariance on that branch. Constraint-tangent injection, multipartite
+partitions, physicality checks and repeated-time sampling have been corrected.
+The regression values in this manual describe the corrected implementation;
+they are not a validation of the published null-control claim. See
+\texttt{AUDIT.md} in the repository root for the derivation and limitations.
 \tableofcontents
 
 \section{Purpose and Scope}
 \texttt{jeener\_packet\_gaussian.py} is an integrated mesoscopic spin-packet
 simulator for the eight-spin Jeener cube. It combines deterministic packet
 dynamics, optional loop-dressed corrections, stochastic torque, short-memory
-damping, certified native packet-mode Gaussian diagnostics, and an optional
+damping, native packet-mode Gaussian diagnostics, and an optional
 engineered quadratic-Gaussian benchmark layer.
 
 This manual is a standalone reference for the code. It documents the
@@ -113,7 +121,7 @@ The program has four main layers:
 \item spectral and time-domain diagnostics for the deterministic packet model;
 \item loop-dressed packet dynamics through \(\alpha\), \(\beta\), \(\sigma\), and
 \(\kappa\) coefficients;
-\item certified native packet-mode Gaussian entanglement diagnostics;
+\item native packet-mode Gaussian entanglement diagnostics;
 \item optional engineered quadratic-Gaussian Hamiltonian benchmarks.
 \end{enumerate}
 
@@ -168,7 +176,7 @@ python3 -u ./jeener_packet_gaussian.py \
 \end{longtable}
 
 \section{Native Packet-Gaussian Entanglement}
-\subsection{Certified native models}
+\subsection{Computed native models}
 The native entanglement analysis is enabled with \texttt{--ent 1}. The key switch
 is \texttt{--ent-native-model}:
 \begin{longtable}{L{0.24\textwidth}L{0.68\textwidth}}
@@ -182,14 +190,16 @@ is \texttt{--ent-native-model}:
 \endhead
 \texttt{frozen} & Uses the initial projected native packet generator. This is the benchmark model used for the PRA reproduction commands in this manual. \\
 \texttt{linearized} & Propagates the native Gaussian covariance with a time-dependent tangent-map model obtained by finite-differencing the nonlinear one-step map around the deterministic background trajectory. This is slower and useful for validation. \\
-\texttt{none} & Keeps certified native output at the separable baseline away from the exact invariant branch. \\
+\texttt{none} & Disables native covariance output; no entanglement result is reported. \\
 \bottomrule
 \end{longtable}
 
 \subsection{Invariant branch}
 When \(\mathbf N(0)=0\), the implemented native branch preserves
-\(\mathbf N(t)=0\). The certified native output is then forced to the separable
-baseline. This gives a useful classical control run:
+\(\mathbf N(t)=0\). The dipolar magnetization fluctuation generator is still
+nonzero, so this response invariant does not imply separable covariance.
+The command below computes that covariance and warns that the paper's null
+control is not reproduced. No separable baseline is imposed:
 \begin{lstlisting}[style=bashstyle]
 python3 -u ./jeener_packet_gaussian.py \
   --mode eigen --kmax 0.03 --loops 0 --Nvec 0 0 0 \
@@ -204,6 +214,18 @@ bipartition metrics, or both. The standard PRA commands use
 \texttt{--ent-pairs}; multipartite subset selection is controlled by
 \texttt{--ent-multi-size}, \texttt{--ent-multi-subsets}, and
 \texttt{--ent-multi-partitions}.
+
+Each three-packet subset is tested across all three one-versus-two
+bipartitions. The score for full inseparability uses the weakest partition, then
+the requested aggregation over subsets. The default aggregation is
+\texttt{max}; \texttt{mean} averages both pair and subset metrics.
+
+The physical packet perturbation includes
+\(\delta\mathbf N_j=-\mathbf M_j(\mathbf N_j\cdot\delta\mathbf M_j)/|\mathbf M_j|^2\),
+which preserves both linearized packet constraints. A canonical basis check
+alone does not certify the Gaussian evolution. The code also checks covariance
+uncertainty and Gaussian complete positivity. Frozen evolution advances
+directly between requested sample times with exact Gaussian steps.
 
 \section{Loop-Dressed Physics Controls}
 The loop order is selected with \texttt{--loops}. The allowed range is 0 through
@@ -266,7 +288,7 @@ fft_map_Nvec_<tag>_kmax_<value>_loops_<order>_<kind>.png
 \textbf{Option} & \textbf{Use} \\
 \midrule
 \endhead
-\texttt{--mode \{all,eigen,map,fft,growth\}} & Selects the diagnostic layer to run. Default: \texttt{all}. \\
+\texttt{--mode} \{all, eigen, map, fft, growth\} & Selects the diagnostic layer to run. Default: \texttt{all}. \\
 \texttt{--k} & Representative \(k\) value for the eigen stick spectrum. Defaults to \(0.8 k_{\max}\). \\
 \texttt{--kmax} & Maximum \(k\) used for swept plots. Default in noninteractive mode: \texttt{0.1}. \\
 \texttt{--NK} & Number of \(k\) samples for FFT maps; also used as a convenient override in some swept diagnostics. \\
@@ -296,7 +318,7 @@ fft_map_Nvec_<tag>_kmax_<value>_loops_<order>_<kind>.png
 \texttt{--Nvec Nx Ny [Nz]} & Preferred interface for the base response vector. If \(N_z\) is omitted it is taken as 0. \\
 \texttt{--N0} & Compatibility interface for setting response magnitude. Prefer \texttt{--Nvec}. \\
 \texttt{--n\_hat} & Direction used with \texttt{--N0}. \\
-\texttt{--pattern \{staggered,uniform,noisy\}} & Distribution pattern for the base response over the cube. The PRA benchmarks use \texttt{staggered}. \\
+\texttt{--pattern} \{staggered, uniform, noisy\} & Distribution pattern for the base response over the cube. The PRA benchmarks use \texttt{staggered}. \\
 \bottomrule
 \end{longtable}
 
@@ -361,7 +383,7 @@ fft_map_Nvec_<tag>_kmax_<value>_loops_<order>_<kind>.png
 \midrule
 \endhead
 \texttt{--ent} & Enable entanglement analysis. Default: \texttt{0}. \\
-\texttt{--ent-layer \{pair,multi,both,gaussian\}} & Select pairwise, multipartite, both, or the pairwise Gaussian alias. Default: \texttt{both}. \\
+\texttt{--ent-layer} \{pair, multi, both, gaussian\} & Select pairwise, multipartite, both, or the pairwise Gaussian alias. Default: \texttt{both}. \\
 \texttt{--ent-pairs \{nn,all,custom\}} & Pair set for pairwise Gaussian metrics. Default: \texttt{nn}. \\
 \texttt{--ent-custom-pairs} & Custom pair list such as \texttt{0-1,2-5}. Used with \texttt{--ent-pairs custom}. \\
 \texttt{--ent-window} & Time-window fraction \(t_0:t_1\) sampled for heatmaps. Default: \texttt{0.8:1.0}. \\
@@ -376,7 +398,7 @@ fft_map_Nvec_<tag>_kmax_<value>_loops_<order>_<kind>.png
 \texttt{--ent-multi-subsets} & Custom multipartite subsets separated by semicolons, e.g. \texttt{0-1-2;0-1-4-5}. \\
 \texttt{--ent-multi-partitions \{1vr,all\}} & Test one-vs-rest or all unique bipartitions inside each selected subset. Default: \texttt{all}. \\
 \texttt{--ent-native-tol} & Tolerance for detecting the exact native invariant branch \(N(t)=0\). Default: \texttt{1e-15}. \\
-\texttt{--ent-native-model \{linearized,frozen,none\}} & Select the certified native model. Default: \texttt{linearized}. PRA benchmark commands in this manual use \texttt{frozen}. \\
+\texttt{--ent-native-model \{linearized,frozen,none\}} & Select the native model. Default: \texttt{linearized}. Benchmark commands use \texttt{frozen}. \\
 \texttt{--ent-native-source \{full,diag,cross,mm-only\}} & Diagnostic block-selection switch. In the canonical packet-mode model, the physical full tangent map is used. Default: \texttt{full}. \\
 \texttt{--ent-native-nth} & Initial thermal occupancy per native Gaussian mode. Default: \texttt{0.0}. \\
 \texttt{--ent-native-nbath} & Bath thermal occupancy for explicit native local damping terms. Default: \texttt{0.0}. \\
@@ -674,22 +696,23 @@ Table~\ref{tab:regression} records representative endpoint values for the
 standard frozen native packet-Gaussian benchmark suite. These are useful for
 checking that a local run is in the expected numerical regime.
 
-\begin{table}[h]
+\begin{table}[ht]
 \centering
+\setlength{\tabcolsep}{3pt}
 \begin{tabular}{L{0.33\textwidth}L{0.20\textwidth}L{0.20\textwidth}L{0.19\textwidth}}
 \toprule
 \textbf{Scenario} & \textbf{Pairwise endpoint} & \textbf{Multipartite endpoint} & \textbf{Comment} \\
 \midrule
-Invariant branch, \(\mathbf N=0\), loops \(=0\) & \(E_N=0\) & \(FI=0\) & Separable control. \\
-Native benchmark, \(\mathbf N=(0.30,0,0)\), loops \(=0\) & \(E_N \simeq 0.6468\) & \(FI \simeq 0.2394\) & Native signal. \\
-\(\sigma\)-enhanced coherent run & \(E_N \simeq 0.7349\) & \(FI \simeq 0.2631\) & Coherent enhancement. \\
-Stronger coherent regime & \(E_N \simeq 0.8091\) & \(FI \simeq 0.2787\) & Largest listed signal. \\
-Thermal run, \texttt{--ent-native-nth 0.10} & \(E_N \simeq 0.3838\) & \(FI \simeq 0.1873\) & Thermal suppression. \\
+Invariant branch, \(\mathbf N=0\), loops \(=0\) & \(E_N \simeq 0.7111\) & \(FI \simeq 0.1908\) & Paper null not reproduced. \\
+Native benchmark, \(\mathbf N=(0.30,0,0)\), loops \(=0\) & \(E_N \simeq 0.6797\) & \(FI \simeq 0.1873\) & Computed result. \\
+\(\sigma\)-enhanced coherent run & \(E_N \simeq 0.7696\) & \(FI \simeq 0.2096\) & Computed result. \\
+Stronger coherent regime & \(E_N \simeq 0.8400\) & \(FI \simeq 0.2333\) & Computed result. \\
+Thermal run, \texttt{--ent-native-nth 0.10} & \(E_N \simeq 0.4167\) & \(FI \simeq 0.1248\) & Computed result. \\
 \bottomrule
 \end{tabular}
 \caption{Representative high-\(k\), end-of-window values for the benchmark
-heatmaps. Small numerical differences may occur across Python, NumPy, SciPy, or
-Matplotlib environments, but the qualitative ordering should remain stable.}
+heatmaps at \(k=0.03\), \(t=8\), tip \(0.05\), staggered pattern and maximum
+aggregation. These are numerical regression values, not paper validation.}
 \label{tab:regression}
 \end{table}
 
@@ -708,9 +731,9 @@ after each command.
 explicit.
 \item The \texttt{linearized} native model is slower than \texttt{frozen}; use it for
 validation or sensitivity checks rather than for the fastest benchmark sweep.
-\item If covariance regularization warnings appear, the reported entanglement is
-conservative because the repair adds isotropic noise before evaluating the
-Gaussian witnesses.
+\item Covariance repair does not validate the underlying quantum channel.
+Complete-positivity failures exclude affected bins. Inspect all validity
+diagnostics and the accepted sample count before interpreting a summary.
 \end{itemize}
 
 \section{Minimal Smoke Tests}

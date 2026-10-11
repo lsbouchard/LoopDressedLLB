@@ -1,0 +1,32 @@
+name: Numerical tests
+on: [push, pull_request]
+jobs:
+  covariance:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            metal: 0
+          - os: macos-latest
+            metal: 0
+          - os: macos-latest
+            metal: 1
+    runs-on: ${{ matrix.os }}
+    env:
+      MPLBACKEND: Agg
+      OPENBLAS_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y liblapack-dev libblas-dev
+      - run: python -m pip install -e ./jeener-packet-gaussian-python
+      - run: python -m unittest discover -s jeener-packet-gaussian-python/tests -v
+      - run: make -C jeener-packet-gaussian-c METAL=${{ matrix.metal }} test
+      - if: runner.os == 'Linux'
+        working-directory: jeener-packet-gaussian-c
+        run: |
+          make clean
+          make METAL=0 CFLAGS='-O1 -g -std=c11 -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer' LDFLAGS='-fsanitize=address,undefined' test-numerics

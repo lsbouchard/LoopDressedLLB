@@ -3,17 +3,16 @@
 `jeener-packet-gaussian` is a research code release for the Jeener-cube packet
 simulator used in the PRA benchmark workflow.
 
-The executable source is preserved at:
+The executable source is:
 
 ```text
 src/jeener_packet_gaussian/simulator.py
 ```
 
-Release source SHA256:
-
-```text
-4892b31a6bb43573c0c5051fbe5f587aa3caef14966adf51a26fc6be889c5722
-```
+The October 2026 audit corrected covariance injection, multipartite partitions,
+physicality checks, and time sampling. The implemented covariance equations
+still do not reproduce the paper's separable `N=0` null control. The earlier
+CLI zero override has been removed. See [the audit](../AUDIT.md).
 
 ## What It Does
 
@@ -23,7 +22,7 @@ The code simulates an eight-spin Jeener cube using mesoscopic packet variables
 - deterministic packet dynamics;
 - loop-dressed corrections through `alpha`, `beta`, `sigma`, and `kappa`;
 - optional stochastic torque and short-memory damping;
-- certified native packet-mode Gaussian entanglement diagnostics;
+- native packet-mode Gaussian entanglement diagnostics;
 - an optional engineered quadratic-Gaussian benchmark layer.
 
 The implementation prepares user-specified initial conditions directly on the
@@ -109,11 +108,16 @@ Representative endpoint values for the `frozen` native packet-Gaussian model:
 
 | Scenario | Pairwise endpoint | Multipartite endpoint |
 |---|---:|---:|
-| Invariant branch, `N=0`, loops `0` | `E_N = 0` | `FI = 0` |
-| Native benchmark, `N=(0.30,0,0)`, loops `0` | `E_N ~= 0.6468` | `FI ~= 0.2394` |
-| Sigma-enhanced coherent run | `E_N ~= 0.7349` | `FI ~= 0.2631` |
-| Stronger coherent regime | `E_N ~= 0.8091` | `FI ~= 0.2787` |
-| Thermal run, `--ent-native-nth 0.10` | `E_N ~= 0.3838` | `FI ~= 0.1873` |
+| Response invariant, `N=0`, loops `0` | `E_N ~= 0.7111` | `FI ~= 0.1908` |
+| Native, `N=(0.30,0,0)`, loops `0` | `E_N ~= 0.6797` | `FI ~= 0.1873` |
+| Sigma-enhanced coherent run | `E_N ~= 0.7696` | `FI ~= 0.2096` |
+| Stronger coherent regime | `E_N ~= 0.8400` | `FI ~= 0.2333` |
+| Thermal run, `--ent-native-nth 0.10` | `E_N ~= 0.4167` | `FI ~= 0.1248` |
+
+These use maximum aggregation, `k=0.03`, `t=8`, tip `0.05`, and a staggered
+pattern. They are computed regression values, not validation of the paper.
+The `mean` option averages both pairs and subsets. The paper's pair averaging
+and the historical maximum-aggregation defaults must not be confused.
 
 ## Tests
 
@@ -121,9 +125,9 @@ Representative endpoint values for the `frozen` native packet-Gaussian model:
 python -m unittest discover -s tests
 ```
 
-The test suite checks importability, the release source identity, the exact
-constrained initialization, and the CLI help path. It also runs under `pytest`
-when `pytest` is available.
+The suite checks analytic Gaussian states, all bipartitions, constraint-tangent
+injection, zero-time identity, repeated samples, the response invariant,
+independent null-branch Jacobians, initialization and CLI behavior.
 
 ## License
 
